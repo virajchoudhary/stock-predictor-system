@@ -1,0 +1,7 @@
+backend/venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.env
+portfolio_report.html

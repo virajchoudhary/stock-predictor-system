@@ -1,0 +1,44 @@
+# QuantVis Backend Dependencies
+# Updated: replaced tensorflow, nsepython, sentence-transformers
+# with modern maintained alternatives
+
+django
+djangorestframework
+gunicorn
+
+# Market Data
+yfinance>=0.2.40
+
+# Data & Math
+pandas
+numpy
+scipy
+scikit-learn
+cvxpy
+
+# Deep Learning (replaced tensorflow)
+torch
+torchvision
+
+# Portfolio Optimisation (replaced random mock)
+PyPortfolioOpt
+
+# AI / LLM
+groq
+
+# Embeddings (replaced sentence-transformers — 10x faster, no 400MB download)
+fastembed
+
+# NSE Options Data (replaced nsepython scraper — uses official NSE endpoints)
+jugaad-data
+
+# Reporting
+quant-reporter
+
+# Frontend
+streamlit
+plotly
+
+# Utilities
+statsmodels
+python-dotenv
