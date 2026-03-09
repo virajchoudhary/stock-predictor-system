@@ -37,7 +37,7 @@ if st.session_state.analysis_result:
         st.error(f"Error: {data['error']}")
     else:
         # --- Tabs Layout ---
-        tab_overview, tab_charts, tab_financials, tab_news = st.tabs(["Overview", "Technical Charts", "Financials", "News"])
+        tab_overview, tab_charts, tab_financials = st.tabs(["Overview", "Technical Charts", "Financials"])
 
         with tab_overview:
             # 1. Top Section: Price & Trend
@@ -118,13 +118,6 @@ if st.session_state.analysis_result:
                 st.dataframe(df_fin[final_cols].style.highlight_max(axis=0))
             else:
                 st.info("No financial details.")
-
-        with tab_news:
-             st.subheader("📰 Recent News")
-             news = data.get('news', [])
-             for n in news:
-                 with st.expander(f"{n.get('title')} - {n.get('publisher')}"):
-                     st.markdown(f"[Read Article]({n.get('link')})")
 
         # 6. Contextual Chat (Always visible at bottom)
         st.divider()
