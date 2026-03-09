@@ -8,6 +8,7 @@ gunicorn
 
 # Market Data
 yfinance>=0.2.40
+polygon-api-client
 
 # Data & Math
 pandas
@@ -20,8 +21,8 @@ cvxpy
 torch
 torchvision
 
-# Portfolio Optimisation (replaced random mock)
-PyPortfolioOpt
+# Portfolio Optimisation (Riskfolio-Lib — HRP, CVaR, Mean-Variance)
+Riskfolio-Lib
 
 # AI / LLM
 groq
@@ -38,6 +39,9 @@ quant-reporter
 # Frontend
 streamlit
 plotly
+
+# Technical Analysis (130+ indicators)
+ta
 
 # Utilities
 statsmodels
