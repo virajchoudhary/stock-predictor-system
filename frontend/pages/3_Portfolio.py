@@ -8,6 +8,44 @@ import streamlit.components.v1 as components
 # Import quant_reporter
 try:
     import quant_reporter as qr
+    import yfinance as yf
+    import pandas as pd
+    import numpy as np
+
+    # --- MONKEY PATCH FOR quant_reporter TO HANDLE yfinance>=0.2.40 SERIES OBJECTS ---
+    if hasattr(qr, 'opt_core'):
+        # 1. Patch get_risk_free_rate
+        def patched_get_risk_free_rate():
+            try:
+                tbill = yf.download("^IRX", period="5d")
+                if tbill is None or tbill.empty:
+                    raise Exception("^IRX download failed")
+                # Correctly handle potential Series object return
+                latest_rate = float(np.ravel(tbill['Close'].iloc[-1])[0]) / 100 
+                if not 0 <= latest_rate <= 0.2:
+                     raise Exception("Rate unrealistic.")
+                return latest_rate
+            except Exception as e:
+                return 0.06
+        qr.opt_core.get_risk_free_rate = patched_get_risk_free_rate
+
+        # 2. Patch calculate_rolling_returns
+        def patched_calculate_rolling_returns(cumulative_df):
+            periods = {'1-Year': 252, '3-Year': 252*3, '5-Year': 252*5}
+            rolling_returns = {}
+            for name, days in periods.items():
+                if len(cumulative_df) > days:
+                    years = days / 252
+                    # Extract scalar value instead of ambiguous Series
+                    end_val = float(np.ravel(cumulative_df.iloc[-1])[0])
+                    start_val = float(np.ravel(cumulative_df.iloc[-days-1])[0])
+                    rolling_returns[name] = [(end_val / start_val)**(1/years) - 1]
+                else:
+                    rolling_returns[name] = [np.nan]
+            return pd.DataFrame.from_dict(rolling_returns, orient='index').map(lambda x: f"{x:.2%}" if not pd.isna(x) else "N/A")
+        qr.opt_core.calculate_rolling_returns = patched_calculate_rolling_returns
+    # ---------------------------------------------------------------------------------
+
     QUANT_REPORTER_AVAILABLE = True
 except ImportError:
     QUANT_REPORTER_AVAILABLE = False
