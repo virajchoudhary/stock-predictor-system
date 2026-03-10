@@ -202,10 +202,9 @@ def calibrate_sabr(strikes, market_ivs, f, t):
 # Layout
 # ---------------------------------------------------------------------------
 
-tab_mispricing, tab_surface, tab_knowledge = st.tabs([
+tab_mispricing, tab_surface = st.tabs([
     "🚀 Mispricing (SABR)",
     "📊 Volatility Surface",
-    "🧠 Pro Knowledge",
 ])
 
 # ---------------------------------------------------------------------------
@@ -367,39 +366,4 @@ with tab_surface:
     )
     st.plotly_chart(fig_surf, use_container_width=True)
 
-# ---------------------------------------------------------------------------
-# TAB 3 — Pro Knowledge
-# ---------------------------------------------------------------------------
-with tab_knowledge:
-    st.markdown("""
-    # The RIGHT way to trade Options in India 🇮🇳
 
-    ### ❌ Why 90% of Retail Sellers Lose
-    1. **Ignoring the Smile**: They sell OTM puts assuming "BS fair value" is correct.
-       In reality, **SABR Skew** shows OTM puts trade at a huge premium (Crash Fear).
-       If you sell cheap, one spike wipes you out.
-    2. **No Gamma Control**: Selling weeklies looks profitable (Theta decay),
-       but **Gamma Risk** explodes in the last 2 days.
-    3. **Static Greeks**: They use Greeks from the start of the day.
-       Market Makers update Greeks **every millisecond** using stochastic models.
-
-    ### 🔥 The Pro Stack
-    1. **SABR**: Captures the Skew/Smile (implemented in Tab 1).
-    2. **Heston Model**: Adds stochastic volatility dynamics (volatility of volatility).
-    3. **Dupire**: Local volatility model for "True" No-Arbitrage.
-    """)
-
-    st.divider()
-
-    st.subheader("💻 Heston Pricing Code (Python)")
-    st.code("""
-import numpy as np
-
-def heston_price(S, K, T, r, kappa, theta, sigma, rho, v0):
-    # Integration of Characteristic Function (Semi-closed form)
-    # Captures that volatility itself is random/stochastic:
-    # dS = mu*S*dt + sqrt(v)*S*dW1
-    # dv = kappa*(theta - v)*dt + sigma*sqrt(v)*dW2
-    pass
-    # Use 'quantlib' or 'scipy.integrate' for full implementation
-    """, language="python")
