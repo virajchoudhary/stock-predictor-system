@@ -1,31 +1,36 @@
-# QuantVis 📈
+# QuantVis
 
-QuantVis is a comprehensive, advanced financial analysis and visualization platform. It combines a robust Django backend for data processing and AI integrations with an interactive Streamlit frontend for dynamic portfolio optimization, market analysis, options mispricing detection, and reporting.
-
----
-
-## 🏗️ Project Structure
-
-The project is divided into two primary components:
-
-*   **`/backend`**: A Django application responsible for API endpoints, AI integrations (e.g., GroqLLM), portfolio optimization logic, and heavy data computations (e.g., `quant_reporter`).
-*   **`/frontend`**: A Streamlit application that consumes the backend APIs to provide interactive dashboards, volatility surfaces, and detailed HTML reports.
-
-Both components share the same Python virtual environment located in `/backend/venv`.
+A full-stack financial analysis platform combining quantitative finance, deep learning, and LLM-powered reasoning. Built on Django (backend) and Streamlit (frontend).
 
 ---
 
-## ⚙️ Prerequisites
+## Features
 
-1.  **Python 3.12+**
-2.  **API Keys**: You will need a Groq API Key for the AI contextual chat and reasoning features.
+- Live candlestick charts with MACD, RSI, and Bollinger Band overlays
+- Portfolio optimization via Hierarchical Risk Parity, Min-CVaR, and Max-Sharpe using riskfolio-lib
+- SABR volatility model calibration with interactive 3D volatility surfaces for options mispricing detection
+- PyTorch LSTM with evolutionary hyperparameter optimization (Genetic Algorithm) for directional price prediction
+- Groq LLM integration (Llama 3) for contextual market reasoning and portfolio analysis
+- Exhaustive HTML backtest reports via quant_reporter (Monte Carlo, Walk-forward)
 
 ---
 
-## 🚀 Setup & Installation
+## Stack
 
-### 1. Initialize the Environment
-Open a terminal and navigate to the `backend` directory to set up the virtual environment:
+| Layer    | Tech                                              |
+|----------|---------------------------------------------------|
+| Backend  | Django REST Framework                             |
+| Frontend | Streamlit + Plotly                                |
+| ML       | PyTorch, scikit-learn, ta                         |
+| Quant    | riskfolio-lib, quant_reporter                     |
+| Data     | Polygon.io (yfinance fallback)                    |
+| AI       | Groq API (Llama 3.3 70B)                         |
+
+---
+
+## Setup
+
+Requires Python 3.12+. A Groq API key is needed for AI features.
 
 ```bash
 cd backend
@@ -34,62 +39,42 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Environment Variables (.env)
-Create a `.env` file inside the `backend/` directory to store your secrets. It should look like this:
+Create a `.env` file inside `backend/`:
 
 ```env
-GROQ_API_KEY="your_groq_api_key_here"
-# Add other environment variables if necessary
+GROQ_API_KEY=your_key_here
 ```
 
-### 3. Database Migrations (Backend)
-Ensure the Django database is set up:
+Run migrations:
+
 ```bash
 python manage.py migrate
 ```
 
 ---
 
-## 🏃‍♂️ How to Run the Application
+## Running
 
-You will need **two separate terminal windows/tabs** to run the backend and frontend simultaneously.
+Two terminals are required.
 
-### Terminal 1: Start the Django Backend Server
-
-The backend must be running for the frontend to fetch optimization data and AI reasoning.
-
+**Terminal 1 — Backend:**
 ```bash
 cd backend
 source venv/bin/activate
 python manage.py runserver 0.0.0.0:8000
 ```
-*The backend API will be available at `http://localhost:8000`.*
 
-### Terminal 2: Start the Streamlit Frontend
-
-Open a new terminal window at the **root of the `QuantVis` project** (not inside the backend folder). We will use the backend's virtual environment to launch Streamlit.
-
+**Terminal 2 — Frontend** (from project root):
 ```bash
-# Ensure you are in the root directory: /Users/mananbansal/Desktop/QuantVis
 ./backend/venv/bin/streamlit run frontend/app.py --server.port 8501
 ```
 
-*The interactive dashboard will automatically open in your browser at `http://localhost:8501`.*
+Backend available at `http://localhost:8000`. Frontend at `http://localhost:8501`.
 
 ---
 
-## 🌟 Key Features
+## Notes
 
-1.  **Dashboard Hub**: Live market data, dynamically scaling Plotly candlestick charts, MACD/RSI technical indicators, and an AI-powered contextual chat assistant.
-2.  **Portfolio Manager**: 
-    *   **Allocator:** Mean-Variance optimization with AI-generated reasoning on the suggested allocations.
-    *   **Deep Report:** Generates exhaustive HTML backtest reports combining Monte Carlo simulations, Walk-forward analysis, and risk metrics using `quant_reporter`.
-3.  **Options Mispricing Detector**: Uses the SABR Volatility model to calibrate implied volatilities against the market, identifying statistically overpriced or undervalued options contracts. Includes interactive 3D Volatility Surfaces. 
-
----
-
-## ⚠️ Troubleshooting
-
-1.  **`FileNotFoundError: portfolio_report.html`**: Ensure you are running the Streamlit app from the root directory so the relative paths resolve correctly.
-2.  **Options Analysis "Simulation Mode"**: `yfinance` frequently blocks live Option Chains for Indian indices (e.g. `^NSEI`). If the app cannot fetch live data via `nsepython` or `yfinance`, it will gracefully fall back to a "Simulation Mode" generating a synthetic volatility smile to demonstrate the SABR calibration logic safely. Try symbol `SPY` to see live US Market option data.
-3.  **No Module Named 'X'**: Ensure your `venv` is activated in that specific terminal before running the server or streamlit.
+- If `portfolio_report.html` throws a FileNotFoundError, make sure Streamlit is launched from the project root, not from inside `backend/`.
+- Options data for Indian indices (`^NSEI`) is frequently blocked by yfinance. The app falls back to a synthetic SABR volatility smile in that case. Use `SPY` for live US options data.
+- If a module is missing, confirm the venv is activated in that terminal before running.
