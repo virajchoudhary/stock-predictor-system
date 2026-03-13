@@ -53,12 +53,12 @@ except ImportError:
 # Configuration
 API_URL = "http://127.0.0.1:8000/api"
 
-st.set_page_config(page_title="Portfolio - QuantVision", page_icon="💼", layout="wide")
+st.set_page_config(page_title="Portfolio - QuantVision", layout="wide")
 
-st.title("Portfolio Manager 💼")
+st.title("Portfolio Manager")
 
 # Tabs
-tab_optimizer, tab_report = st.tabs(["🚀 Allocator (Optimizer)", "📄 Deep Report (Backtest)"])
+tab_optimizer, tab_report = st.tabs(["Allocator (Optimizer)", "Deep Report (Backtest)"])
 
 # --- TAB 1: OPTIMIZER (Existing Logic) ---
 with tab_optimizer:
@@ -105,7 +105,7 @@ with tab_optimizer:
                             st.table(df)
                         
                         # AI Commentary
-                        st.info(f"🤖 **AI Analysis:**\n\n{reasoning}")
+                        st.info(f"**AI Analysis:**\n\n{reasoning}")
 
                     else:
                         st.error("Optimization failed.")
@@ -120,7 +120,7 @@ with tab_report:
     else:
         st.write("Generate a comprehensive PDF-style HTML report with Backtesting, Efficient Frontier, and Monte Carlo simulations.")
         
-        with st.expander("📝 Report Configuration", expanded=True):
+        with st.expander("Report Configuration", expanded=True):
             col_in1, col_in2 = st.columns(2)
             with col_in1:
                 repo_tickers = st.text_input("Portfolio Tickers", "AAPL, MSFT, SPY, QQQ")
@@ -131,7 +131,7 @@ with tab_report:
                 start_date = st.date_input("Training Start Date", default_start)
                 end_date = st.date_input("Training End Date", datetime.now() - timedelta(days=90)) # Leave 90 days for Test
                 
-        if st.button("Generate Deep Report 📊"):
+        if st.button("Generate Deep Report"):
             r_tickers = [t.strip() for t in repo_tickers.split(",") if t.strip()]
             
             if not r_tickers:
@@ -168,7 +168,7 @@ with tab_report:
                         
                         # Display Download Button
                         st.download_button(
-                            label="📥 Download HTML Report",
+                            label="Download HTML Report",
                             data=html_content,
                             file_name="My_Quant_Report.html",
                             mime="text/html"

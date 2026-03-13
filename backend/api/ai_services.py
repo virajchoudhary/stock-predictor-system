@@ -233,7 +233,45 @@ class TrendPredictor:
         return parsed
 
     @staticmethod
-    def predict(symbol):
+    def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30):
+        """
+        Trains an LSTM on recent data using given hyperparams and returns
+        the next-day predicted Close price (unscaled).
+        Returns None on any failure.
+        """
+        try:
+            from .evolution import get_train_val_data
+            result = get_train_val_data(symbol, seq_len=20)
+            X_train, y_train, X_val, y_val, scaler, input_size = result
+
+            model     = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers)
+            criterion = nn.MSELoss()
+            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+            model.train()
+            for _ in range(epochs):
+                optimizer.zero_grad()
+                out  = model(X_train)
+                loss = criterion(out, y_train)
+                loss.backward()
+                optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                # Use the last validation sequence as input for next-day prediction
+                last_seq    = X_val[-1].unsqueeze(0)  # shape: (1, seq_len, input_size)
+                pred_scaled = model(last_seq).item()
+
+            # Inverse transform: only Close (column 0) was predicted
+            dummy       = np.zeros((1, input_size))
+            dummy[0, 0] = pred_scaled
+            pred_price  = scaler.inverse_transform(dummy)[0, 0]
+            return float(pred_price)
+        except Exception:
+            return None
+
+    @staticmethod
+    def predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30, hyperparams_source='default'):
         try:
             # ---- Price History ----
             hist_daily  = get_price_history(symbol, period="6mo")
@@ -350,16 +388,21 @@ class TrendPredictor:
             bearish_votes = sum(1 for s in signals if "Bearish" in s or "Overbought" in s)
 
             if bullish_votes > bearish_votes:
-                trend      = "UP"
-                change_pct = np.random.uniform(0.01, 0.05)
+                trend = "UP"
             elif bearish_votes > bullish_votes:
-                trend      = "DOWN"
-                change_pct = np.random.uniform(-0.05, -0.01)
+                trend = "DOWN"
             else:
-                trend      = "NEUTRAL"
-                change_pct = np.random.uniform(-0.005, 0.005)
+                trend = "NEUTRAL"
 
-            predicted_price     = recent_close * (1 + change_pct)
+            # LSTM price prediction — uses evolved hyperparams if available
+            lstm_price = TrendPredictor._lstm_predict(
+                symbol,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                learning_rate=learning_rate,
+                epochs=epochs
+            )
+            predicted_price = lstm_price if lstm_price is not None else recent_close * 1.001
             last_30_days_prices = hist_daily["Close"].tail(30).tolist()
 
             # ---- AI Reasoning ----
@@ -414,6 +457,7 @@ class TrendPredictor:
                     hist_daily.to_json(orient="split", date_format="iso")
                 ),
                 "reasoning": ai_reasoning,
+                "hyperparams_source": hyperparams_source,
             }
 
         except Exception as e:

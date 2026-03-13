@@ -6,9 +6,9 @@ import plotly.graph_objects as go
 # Configuration
 API_URL = "http://127.0.0.1:8000/api"
 
-st.set_page_config(page_title="Dashboard - QuantVision", page_icon="📊")
+st.set_page_config(page_title="Dashboard - QuantVision")
 
-st.title("Market Trend Predictor 📊")
+st.title("Market Trend Predictor")
 
 symbol = st.text_input("Enter Stock Symbol (e.g., AAPL, RELIANCE.NS)", "AAPL")
 
@@ -52,15 +52,23 @@ if st.session_state.analysis_result:
             with col3:
                 st.header(f"Trend: {data['trend']}")
                 if data['trend'] == "UP":
-                    st.success("BULLISH 🚀")
+                    st.success("BULLISH")
+                elif data['trend'] == "DOWN":
+                    st.error("BEARISH")
                 else:
-                    st.error("BEARISH 📉")
-            
+                    st.warning("NEUTRAL")
+
+                # New: Display AI Model Source
+                if data.get('hyperparams_source') == 'evolved':
+                    st.info(f"Powered by **Evolved AI** (Accuracy: {data.get('evolved_accuracy', 0):.1f}%)")
+                else:
+                    st.warning("Powered by **Default AI** (Optimize in Evolutionary HPO tab for better results)")
+
             st.caption(f"Technical Signals: {', '.join(data.get('technicals', {}).get('signals', []))}")
             
             # 2. AI Analysis
             st.divider()
-            st.subheader("🤖 AI Market Analysis")
+            st.subheader("AI Market Analysis")
             st.markdown(data.get('reasoning', 'No analysis available.'))
 
         with tab_charts:
@@ -96,7 +104,7 @@ if st.session_state.analysis_result:
                 st.warning("No OHLC data for charts.")
 
             st.divider()
-            st.subheader("📈 Peer Comparison (% Return)")
+            st.subheader("Peer Comparison (% Return)")
             peer_history = data.get('peer_history', {})
             if peer_history:
                 fig_comp = go.Figure()
@@ -109,7 +117,7 @@ if st.session_state.analysis_result:
                 st.plotly_chart(fig_comp, use_container_width=True)
 
         with tab_financials:
-            st.subheader("📊 Fundamental Comparison")
+            st.subheader("Fundamental Comparison")
             peer_financials = data.get('peer_financials', [])
             if peer_financials:
                 df_fin = pd.DataFrame(peer_financials)
@@ -121,7 +129,7 @@ if st.session_state.analysis_result:
 
         # 6. Contextual Chat (Always visible at bottom)
         st.divider()
-        st.subheader("💬 Ask about this Stock")
+        st.subheader("Ask about this Stock")
         
         if "dashboard_messages" not in st.session_state:
                 st.session_state.dashboard_messages = []

@@ -24,11 +24,10 @@ except ImportError:
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="Options Analysis - QuantVis",
-    page_icon="📈",
     layout="wide",
 )
 
-st.title("🛡️ Options Mispricing Detector (SABR Model)")
+st.title("Options Mispricing Detector (SABR Model)")
 
 # ---------------------------------------------------------------------------
 # Utility Functions
@@ -81,7 +80,7 @@ def fetch_option_chain(symbol):
 
         except Exception as e:
             st.warning(
-                f"⚠️ jugaad-data live fetch failed for {index_name}: `{e}`. "
+                f"jugaad-data live fetch failed for {index_name}: `{e}`. "
                 "Falling back to simulation mode."
             )
             # Fall through to simulation below
@@ -203,8 +202,8 @@ def calibrate_sabr(strikes, market_ivs, f, t):
 # ---------------------------------------------------------------------------
 
 tab_mispricing, tab_surface = st.tabs([
-    "🚀 Mispricing (SABR)",
-    "📊 Volatility Surface",
+    "Mispricing (SABR)",
+    "Volatility Surface",
 ])
 
 # ---------------------------------------------------------------------------
@@ -220,10 +219,10 @@ with tab_mispricing:
             help="US: SPY, AAPL, QQQ  |  India: NIFTY or NIFTY 50 (uses jugaad-data live NSE feed)",
         )
         if JUGAAD_AVAILABLE:
-            st.caption("✅ jugaad-data installed — NIFTY live data available.")
+            st.caption("jugaad-data installed — NIFTY live data available.")
         else:
             st.caption(
-                "⚠️ jugaad-data not installed. "
+                "jugaad-data not installed. "
                 "Run `pip install jugaad-data` for live NSE options. "
                 "NIFTY will use simulation mode."
             )
@@ -236,11 +235,11 @@ with tab_mispricing:
 
             if is_simulated:
                 st.warning(
-                    f"⚠️ **SIMULATION MODE** — Live data unavailable for `{symbol}`. "
+                    f"**SIMULATION MODE** — Live data unavailable for `{symbol}`. "
                     "Displaying a realistic Nifty volatility smile to demonstrate SABR calibration."
                 )
             else:
-                st.success(f"✅ **LIVE / DELAYED DATA** — Option chain fetched for `{symbol}`.")
+                st.success(f"**LIVE / DELAYED DATA** — Option chain fetched for `{symbol}`.")
 
             with col_status:
                 st.metric("Spot Price", f"₹{spot_price:,.2f}", f"Expiry: {expiry_date}")
@@ -315,7 +314,7 @@ with tab_mispricing:
                 )
                 st.plotly_chart(fig_smile, use_container_width=True)
 
-                st.subheader("⚠️ Mispricing Alerts")
+                st.subheader("Mispricing Alerts")
                 st.dataframe(
                     liquid_calls[[
                         "strike", "lastPrice", "impliedVolatility",
