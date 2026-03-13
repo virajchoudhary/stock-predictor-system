@@ -4,9 +4,9 @@ import requests
 # Configuration
 API_URL = "http://127.0.0.1:8000/api"
 
-st.set_page_config(page_title="AI Chat - QuantVision", page_icon="💬")
+st.set_page_config(page_title="AI Chat - QuantVision")
 
-st.title("AI Investment Advisor 💬")
+st.title("AI Investment Advisor")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
