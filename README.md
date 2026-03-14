@@ -1,4 +1,5 @@
-# QuantVis
+# Stock Predictor System
+
 
 A full-stack financial analysis platform combining quantitative finance, deep learning, and LLM-powered reasoning. Built on Django (backend) and Streamlit (frontend).
 
