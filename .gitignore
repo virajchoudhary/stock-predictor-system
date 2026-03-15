@@ -1,7 +1,11 @@
-backend/venv/
-__pycache__/
+*.DS_Store
+*.env
 *.pyc
 *.pyo
-.DS_Store
-*.env
+._*
+__pycache__/
+backend/venv/
+celerybeat-schedule
+celerybeat-schedule-shm
+celerybeat-schedule-wal
 portfolio_report.html

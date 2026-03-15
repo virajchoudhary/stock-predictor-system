@@ -36,70 +36,73 @@ if st.session_state.analysis_result:
     if "error" in data:
         st.error(f"Error: {data['error']}")
     else:
-        # --- Tabs Layout ---
-        tab_overview, tab_charts, tab_financials = st.tabs(["Overview", "Technical Charts", "Financials"])
+        # --- Overview: always visible ---
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Current Price", f"${data['current_price']:.2f}")
+        with col2:
+            pred_price = data['predicted_price']
+            curr_price = data['current_price']
+            pct_change = ((pred_price - curr_price) / curr_price) * 100
+            st.metric("Predicted Price", f"${pred_price:.2f}", delta=f"{pct_change:.2f}%")
+        with col3:
+            if data['trend'] == "UP":
+                st.success("BULLISH")
+            elif data['trend'] == "DOWN":
+                st.error("BEARISH")
+            else:
+                st.warning("NEUTRAL")
+            if data.get('hyperparams_source') == 'evolved':
+                st.info("Quantitative Model Active")
+            else:
+                st.warning("Default Model Active — optimizing overnight.")
+        with col4:
+            if data.get('hyperparams_source') == 'evolved':
+                st.metric("Model Accuracy", f"{data.get('evolved_accuracy', 0):.1f}%")
+            else:
+                st.metric("Model Accuracy", "—")
 
-        with tab_overview:
-            # 1. Top Section: Price & Trend
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Current Price", f"${data['current_price']:.2f}")
-            with col2:
-                pred_price = data['predicted_price']
-                curr_price = data['current_price']
-                pct_change = ((pred_price - curr_price) / curr_price) * 100
-                st.metric("Predicted Price (30d)", f"${pred_price:.2f}", delta=f"{pct_change:.2f}%")
-            with col3:
-                st.header(f"Trend: {data['trend']}")
-                if data['trend'] == "UP":
-                    st.success("BULLISH")
-                elif data['trend'] == "DOWN":
-                    st.error("BEARISH")
-                else:
-                    st.warning("NEUTRAL")
+        st.caption(f"Technical Signals: {', '.join(data.get('technicals', {}).get('signals', []))}")
 
-                # New: Display AI Model Source
-                if data.get('hyperparams_source') == 'evolved':
-                    st.info(f"Powered by **Evolved AI** (Accuracy: {data.get('evolved_accuracy', 0):.1f}%)")
-                else:
-                    st.warning("Powered by **Default AI** (Optimize in Evolutionary HPO tab for better results)")
+        st.divider()
+        st.subheader("AI Market Analysis")
+        st.markdown(data.get('reasoning', 'No analysis available.'))
 
-            st.caption(f"Technical Signals: {', '.join(data.get('technicals', {}).get('signals', []))}")
-            
-            # 2. AI Analysis
-            st.divider()
-            st.subheader("AI Market Analysis")
-            st.markdown(data.get('reasoning', 'No analysis available.'))
-
-        with tab_charts:
-            st.subheader("Interactive Price Chart")
+        # --- Technical Charts: collapsible ---
+        with st.expander("Technical Charts", expanded=True):
             ohlc_json = data.get('ohlc_data', {})
             if ohlc_json:
-                 # Reconstruct DataFrame
-                 df_ohlc = pd.DataFrame(ohlc_json['data'], columns=ohlc_json['columns'], index=pd.to_datetime(ohlc_json['index']))
-                 
-                 # Create Candlestick Chart with Volume
-                 fig = go.Figure()
-                 fig.add_trace(go.Candlestick(x=df_ohlc.index,
-                                 open=df_ohlc['Open'],
-                                 high=df_ohlc['High'],
-                                 low=df_ohlc['Low'],
-                                 close=df_ohlc['Close'],
-                                 name='Price'))
-                 
-                 fig.update_layout(xaxis_rangeslider_visible=True, height=500, title=f"{symbol} Price Action")
-                 st.plotly_chart(fig, use_container_width=True)
-                 
-                 # RSI Indicator
-                 technicals = data.get('technicals', {})
-                 rsi_val = technicals.get('rsi', 50)
-                 
-                 st.metric("RSI (14)", f"{rsi_val:.2f}")
-                 st.progress(int(rsi_val))
-                 if rsi_val > 70: st.warning("Overbought (>70)")
-                 elif rsi_val < 30: st.success("Oversold (<30)")
-                 else: st.info("Neutral")
-                 
+                df_ohlc = pd.DataFrame(
+                    ohlc_json['data'],
+                    columns=ohlc_json['columns'],
+                    index=pd.to_datetime(ohlc_json['index'])
+                )
+                fig = go.Figure()
+                fig.add_trace(go.Candlestick(
+                    x=df_ohlc.index,
+                    open=df_ohlc['Open'],
+                    high=df_ohlc['High'],
+                    low=df_ohlc['Low'],
+                    close=df_ohlc['Close'],
+                    name='Price'
+                ))
+                fig.update_layout(
+                    xaxis_rangeslider_visible=True,
+                    height=500,
+                    title=f"{symbol} Price Action"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                technicals = data.get('technicals', {})
+                rsi_val = technicals.get('rsi', 50)
+                st.metric("RSI (14)", f"{rsi_val:.2f}")
+                st.progress(int(rsi_val))
+                if rsi_val > 70:
+                    st.warning("Overbought (>70)")
+                elif rsi_val < 30:
+                    st.success("Oversold (<30)")
+                else:
+                    st.info("Neutral")
             else:
                 st.warning("No OHLC data for charts.")
 
@@ -111,23 +114,28 @@ if st.session_state.analysis_result:
                 for s, prices in peer_history.items():
                     if prices:
                         start = prices[0]
-                        pct = [((p-start)/start)*100 for p in prices]
+                        pct = [((p - start) / start) * 100 for p in prices]
                         fig_comp.add_trace(go.Scatter(y=pct, mode='lines', name=s))
-                fig_comp.update_layout(yaxis_title="Return (%)", margin=dict(l=0,r=0,t=10,b=0))
+                fig_comp.update_layout(
+                    yaxis_title="Return (%)",
+                    margin=dict(l=0, r=0, t=10, b=0)
+                )
                 st.plotly_chart(fig_comp, use_container_width=True)
 
-        with tab_financials:
-            st.subheader("Fundamental Comparison")
+        # --- Financials: collapsible ---
+        with st.expander("Fundamentals", expanded=True):
             peer_financials = data.get('peer_financials', [])
             if peer_financials:
                 df_fin = pd.DataFrame(peer_financials)
-                cols = ['Symbol', 'Current Price', 'Market Cap', 'PE Ratio', 'EPS (Trailing)', 'Debt to Equity', 'Revenue Growth']
+                cols = ['Symbol', 'Current Price', 'Market Cap', 'PE Ratio',
+                        'EPS (Trailing)', 'Debt to Equity', 'Revenue Growth']
                 final_cols = [c for c in cols if c in df_fin.columns]
-                st.dataframe(df_fin[final_cols].style.highlight_max(axis=0))
+                st.dataframe(df_fin[final_cols].style.highlight_max(axis=0),
+                             use_container_width=True)
             else:
                 st.info("No financial details.")
 
-        # 6. Contextual Chat (Always visible at bottom)
+        # --- Chat: always at bottom ---
         st.divider()
         st.subheader("Ask about this Stock")
         

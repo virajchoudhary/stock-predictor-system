@@ -1,0 +1,227 @@
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from pypfopt import BlackLittermanModel, risk_models, expected_returns
+from pypfopt.black_litterman import market_implied_prior_returns
+from .ai_services import TrendPredictor, get_price_history
+from .models import OptimizedHyperparams
+
+
+DEFAULT_CONFIDENCE = 0.3
+MIN_CONFIDENCE     = 0.1
+MAX_CONFIDENCE     = 0.9
+
+
+def get_market_caps(tickers):
+    """
+    Fetch market cap for each ticker via yfinance.
+    Falls back to equal weighting if market cap unavailable.
+    Returns dict {symbol: market_cap}.
+    """
+    caps = {}
+    for t in tickers:
+        try:
+            info = yf.Ticker(t).info
+            cap  = info.get("marketCap") or info.get("market_cap")
+            if cap and cap > 0:
+                caps[t] = float(cap)
+        except Exception:
+            pass
+
+    if not caps:
+        return {t: 1.0 for t in tickers}
+
+    # fill missing with average
+    avg = np.mean(list(caps.values()))
+    for t in tickers:
+        if t not in caps:
+            caps[t] = avg
+
+    return caps
+
+
+def build_views(tickers):
+    """
+    For each ticker:
+    - Fetch current price
+    - Run _lstm_predict using evolved hyperparams if available
+    - Compute expected return = (predicted - current) / current
+    - Set confidence from directional_accuracy if evolved, else DEFAULT_CONFIDENCE
+
+    Returns:
+        views: dict {symbol: expected_return_float}
+        confidences: dict {symbol: confidence_float}
+        view_details: list of dicts for frontend display
+    """
+    views       = {}
+    confidences = {}
+    view_details = []
+
+    for symbol in tickers:
+        try:
+            # get current price
+            hist = get_price_history(symbol, period="5d")
+            if hist is None or hist.empty:
+                continue
+            current_price = float(hist["Close"].iloc[-1])
+
+            # check for evolved hyperparams
+            cached = OptimizedHyperparams.get_valid_cache(symbol)
+
+            if cached:
+                predicted_price = TrendPredictor._lstm_predict(
+                    symbol,
+                    hidden_size    = cached.hidden_size,
+                    num_layers     = cached.num_layers,
+                    learning_rate  = cached.learning_rate,
+                    epochs         = cached.epochs,
+                    dropout        = cached.dropout,
+                    seq_len        = cached.seq_len
+                )
+                # scale accuracy to confidence — clip to [MIN, MAX]
+                raw_conf   = cached.directional_accuracy / 100
+                confidence = float(np.clip(raw_conf, MIN_CONFIDENCE, MAX_CONFIDENCE))
+                model_source = "evolved"
+                accuracy     = cached.directional_accuracy
+            else:
+                # No evolved model — queue GA immediately in background
+                try:
+                    from .tasks import run_ga_for_ticker
+                    run_ga_for_ticker.delay(symbol)
+                    queued = True
+                except Exception:
+                    queued = False
+
+                predicted_price = TrendPredictor._lstm_predict(symbol)
+                confidence      = DEFAULT_CONFIDENCE
+                model_source    = "queued" if queued else "default"
+                accuracy        = None
+
+            if predicted_price is None:
+                continue
+
+            expected_return = (predicted_price - current_price) / current_price
+
+            views[symbol]       = expected_return
+            confidences[symbol] = confidence
+
+            view_details.append({
+                "symbol":           symbol,
+                "current_price":    round(current_price, 2),
+                "predicted_price":  round(predicted_price, 2),
+                "expected_return":  round(expected_return * 100, 2),
+                "confidence":       round(confidence * 100, 1),
+                "model_source":     model_source,  # "evolved", "queued", or "default"
+                "accuracy":         round(accuracy, 1) if accuracy else None
+            })
+
+        except Exception:
+            continue
+
+    return views, confidences, view_details
+
+
+def run_black_litterman(tickers):
+    """
+    Full BL pipeline:
+    1. Fetch price history and compute covariance matrix
+    2. Fetch market caps and compute market-implied prior returns
+    3. Build LSTM views and confidence levels
+    4. Run BlackLittermanModel
+    5. Return allocation weights, views detail, and BL expected returns
+
+    Returns dict with keys:
+        allocation: {symbol: weight}
+        view_details: list of view dicts
+        bl_returns: {symbol: expected_return_%}
+        error: str or None
+    """
+    try:
+        # --- Price data ---
+        frames = {}
+        for t in tickers:
+            hist = get_price_history(t, period="2y")
+            if hist is not None and not hist.empty:
+                frames[t] = hist["Close"]
+
+        if len(frames) < 2:
+            return {"error": "Need at least 2 tickers with sufficient price history."}
+
+        prices = pd.DataFrame(frames).dropna()
+        if len(prices) < 60:
+            return {"error": "Not enough historical data (need 60+ days)."}
+
+        # only keep tickers we have data for
+        valid_tickers = list(prices.columns)
+
+        # --- Covariance matrix ---
+        cov_matrix = risk_models.sample_cov(prices)
+
+        # --- Market caps and prior returns ---
+        market_caps    = get_market_caps(valid_tickers)
+        market_weights = pd.Series(market_caps) / sum(market_caps.values())
+        market_weights = market_weights[valid_tickers]
+
+        delta       = 2.5  # market risk aversion — standard value
+        prior       = market_implied_prior_returns(
+            market_weights, delta, cov_matrix
+        )
+
+        # --- LSTM views ---
+        views, confidences, view_details = build_views(valid_tickers)
+
+        if not views:
+            return {"error": "Could not generate LSTM views for any ticker."}
+
+        # --- Omega (uncertainty) matrix ---
+        # Omega diagonal = (1 - confidence) * variance of view portfolio
+        # PyPortfolioOpt handles this via intervals — we build manually
+        omega_diag = []
+        view_symbols = list(views.keys())
+        for sym in view_symbols:
+            conf      = confidences.get(sym, DEFAULT_CONFIDENCE)
+            # higher confidence → lower uncertainty
+            variance  = float(cov_matrix.loc[sym, sym]) if sym in cov_matrix.index else 0.01
+            omega_val = (1 - conf) * variance
+            omega_diag.append(max(omega_val, 1e-6))  # floor to avoid singularity
+
+        # P matrix: one row per view, identity for absolute views
+        P = pd.DataFrame(0.0, index=view_symbols, columns=valid_tickers)
+        for sym in view_symbols:
+            if sym in P.columns:
+                P.loc[sym, sym] = 1.0
+
+        Q      = pd.Series(views)
+        omega  = np.diag(omega_diag)
+
+        # --- Black-Litterman model ---
+        bl = BlackLittermanModel(
+            cov_matrix,
+            pi        = prior,
+            P         = P,
+            Q         = Q,
+            omega     = omega,
+            risk_aversion = delta
+        )
+
+        bl_returns = bl.bl_returns()
+
+        # --- Mean-Variance optimization on BL returns ---
+        from pypfopt import EfficientFrontier
+        ef = EfficientFrontier(bl_returns, cov_matrix)
+        ef.max_sharpe(risk_free_rate=0.05)
+        weights = ef.clean_weights()
+
+        allocation = {k: round(float(v), 4) for k, v in weights.items() if float(v) > 0.001}
+
+        bl_returns_pct = {k: round(float(v) * 100, 2) for k, v in bl_returns.items()}
+
+        return {
+            "allocation":   allocation,
+            "view_details": view_details,
+            "bl_returns":   bl_returns_pct,
+            "error":        None
+        }
+
+    except Exception as e:
+        return {"error": str(e)}

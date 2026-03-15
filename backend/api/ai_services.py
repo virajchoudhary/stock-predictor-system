@@ -33,14 +33,17 @@ polygon_client  = RESTClient(api_key=polygon_api_key) if polygon_api_key else No
 # LSTM Model Definition (PyTorch)
 # ---------------------------------------------------------------------------
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=50, num_layers=1):
+    def __init__(self, input_size=1, hidden_size=50, num_layers=1, dropout=0.0):
         super(LSTMModel, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc   = nn.Linear(hidden_size, 1)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
+                            batch_first=True, 
+                            dropout=dropout if num_layers > 1 else 0.0)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(out[:, -1, :])
+        return self.fc(self.dropout(out[:, -1, :]))
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +236,7 @@ class TrendPredictor:
         return parsed
 
     @staticmethod
-    def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30):
+    def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30, dropout=0.0, seq_len=20):
         """
         Trains an LSTM on recent data using given hyperparams and returns
         the next-day predicted Close price (unscaled).
@@ -241,10 +244,10 @@ class TrendPredictor:
         """
         try:
             from .evolution import get_train_val_data
-            result = get_train_val_data(symbol, seq_len=20)
+            result = get_train_val_data(symbol, seq_len=seq_len)
             X_train, y_train, X_val, y_val, scaler, input_size = result
 
-            model     = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers)
+            model     = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, dropout=dropout)
             criterion = nn.MSELoss()
             optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -271,7 +274,7 @@ class TrendPredictor:
             return None
 
     @staticmethod
-    def predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30, hyperparams_source='default'):
+    def predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30, dropout=0.0, seq_len=20, hyperparams_source='default'):
         try:
             # ---- Price History ----
             hist_daily  = get_price_history(symbol, period="6mo")
@@ -387,21 +390,32 @@ class TrendPredictor:
             bullish_votes = sum(1 for s in signals if "Bullish" in s or "Oversold" in s)
             bearish_votes = sum(1 for s in signals if "Bearish" in s or "Overbought" in s)
 
-            if bullish_votes > bearish_votes:
-                trend = "UP"
-            elif bearish_votes > bullish_votes:
-                trend = "DOWN"
-            else:
-                trend = "NEUTRAL"
-
             # LSTM price prediction — uses evolved hyperparams if available
             lstm_price = TrendPredictor._lstm_predict(
                 symbol,
                 hidden_size=hidden_size,
                 num_layers=num_layers,
                 learning_rate=learning_rate,
-                epochs=epochs
+                epochs=epochs,
+                dropout=dropout,
+                seq_len=seq_len
             )
+
+            if lstm_price is not None:
+                if lstm_price > recent_close:
+                    trend = "UP"
+                elif lstm_price < recent_close:
+                    trend = "DOWN"
+                else:
+                    trend = "NEUTRAL"
+            else:
+                if bullish_votes > bearish_votes:
+                    trend = "UP"
+                elif bearish_votes > bullish_votes:
+                    trend = "DOWN"
+                else:
+                    trend = "NEUTRAL"
+
             predicted_price = lstm_price if lstm_price is not None else recent_close * 1.001
             last_30_days_prices = hist_daily["Close"].tail(30).tolist()
 
