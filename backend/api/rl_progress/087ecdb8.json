@@ -1,0 +1,1 @@
+{"progress": 100, "status": "complete", "timestep": 50000, "total_timesteps": 50000, "reward": 0.0, "allocation": {"AAPL": 0.8028, "MSFT": 0.1972, "TCS.NS": 0.0, "RELIANCE.NS": 0.0}, "portfolio_history": [100000.0], "tickers": ["AAPL", "MSFT", "TCS.NS", "RELIANCE.NS"], "final_value": 100000.0, "total_return": 0.0}
