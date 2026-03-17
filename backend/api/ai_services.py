@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import numpy as np
 import pandas as pd
 from groq import Groq
@@ -11,7 +12,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 try:
     from fastembed import TextEmbedding
-    embedding_model = None  # disabled to skip download
+    embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 except Exception:
     embedding_model = None
 
@@ -24,17 +25,20 @@ polygon_client  = RESTClient(api_key=polygon_api_key) if polygon_api_key else No
 
 
 # ---------------------------------------------------------------------------
-# LSTM
+# LSTM Model (used by both TrendPredictor and evolution.py)
 # ---------------------------------------------------------------------------
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=50, num_layers=1):
+    def __init__(self, input_size=1, hidden_size=50, num_layers=1, dropout=0.0):
         super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc   = nn.Linear(hidden_size, 1)
+        self.lstm    = nn.LSTM(input_size, hidden_size, num_layers,
+                               batch_first=True,
+                               dropout=dropout if num_layers > 1 else 0.0)
+        self.dropout = nn.Dropout(dropout)
+        self.fc      = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(out[:, -1, :])
+        return self.fc(self.dropout(out[:, -1, :]))
 
 
 # ---------------------------------------------------------------------------
@@ -85,22 +89,20 @@ class GroqService:
 
     @staticmethod
     def score_news_sentiment(ticker, headlines):
-        """Returns float in [-1, +1]. Uses Groq to score headlines."""
         if not groq_client or not headlines:
             return 0.0
         try:
             joined = "\n".join(f"- {h}" for h in headlines[:5])
             prompt = f"""
-You are a financial news analyst. Given these recent headlines for {ticker},
-return ONLY a single float between -1.0 and 1.0 (-1=very bearish, 0=neutral, +1=very bullish).
+You are a financial news analyst. Given these headlines for {ticker},
+return ONLY a float between -1.0 (very bearish) and +1.0 (very bullish).
 Return only the number, nothing else.
 Headlines:
 {joined}
 """
             resp = groq_client.chat.completions.create(
                 messages=[{"role": "user", "content": prompt}],
-                model="llama-3.3-70b-versatile",
-                max_tokens=10,
+                model="llama-3.3-70b-versatile", max_tokens=10,
             )
             return float(np.clip(float(resp.choices[0].message.content.strip()), -1.0, 1.0))
         except Exception:
@@ -108,7 +110,7 @@ Headlines:
 
 
 # ---------------------------------------------------------------------------
-# Sector risk multipliers (higher = riskier)
+# Sector risk multipliers
 # ---------------------------------------------------------------------------
 SECTOR_RISK = {
     "technology": 1.4, "semiconductors": 1.5, "crypto": 2.0,
@@ -194,86 +196,67 @@ def compute_fundamental_score(info):
     ]:
         try:
             v = float(val)
-            if invert:
-                scores.append(float(np.clip(1.0 - v / scale, 0.0, 1.0)))
-            else:
-                scores.append(float(np.clip(v / scale, 0.0, 1.0)))
+            scores.append(float(np.clip(1.0 - v / scale if invert else v / scale, 0.0, 1.0)))
         except Exception:
             scores.append(0.5)
     return float(np.mean(scores))
 
 
-# ---------------------------------------------------------------------------
-# Pre-fetch fundamentals + sentiment per ticker (once before training)
-# ---------------------------------------------------------------------------
-
 def fetch_ticker_features(tickers):
     features = {}
     for t in tickers:
         try:
-            info   = get_ticker_info(t)
-            sector = info.get("sector", info.get("sic_description", ""))
-            f_score = compute_fundamental_score(info)
-            headlines = []
+            info        = get_ticker_info(t)
+            sector      = info.get("sector", info.get("sic_description", ""))
+            f_score     = compute_fundamental_score(info)
+            headlines   = []
             try:
-                raw = yf.Ticker(t).news or []
-                for n in raw[:5]:
+                for n in (yf.Ticker(t).news or [])[:5]:
                     c = n.get("content", n)
                     title = c.get("title", n.get("title", ""))
-                    if title:
-                        headlines.append(title)
+                    if title: headlines.append(title)
             except Exception:
                 pass
             sentiment   = GroqService.score_news_sentiment(t, headlines)
             sector_risk = get_sector_risk(sector)
-            features[t] = {
-                "fundamental_score": f_score,
-                "news_sentiment":    sentiment,
-                "sector_risk":       sector_risk,
-            }
+            features[t] = {"fundamental_score": f_score,
+                           "news_sentiment":    sentiment,
+                           "sector_risk":       sector_risk}
         except Exception:
-            features[t] = {"fundamental_score": 0.5, "news_sentiment": 0.0, "sector_risk": 1.0}
+            features[t] = {"fundamental_score": 0.5,
+                           "news_sentiment":    0.0,
+                           "sector_risk":       1.0}
     return features
 
 
 # ---------------------------------------------------------------------------
-# Rolling technical indicators (fast numpy/pandas implementations)
+# Rolling technical indicators
 # ---------------------------------------------------------------------------
 
 def _rolling_rsi(prices, window=14):
-    if len(prices) < window + 1:
-        return 0.5
-    deltas = np.diff(prices)
-    gains  = np.maximum(deltas, 0.0)
-    losses = np.maximum(-deltas, 0.0)
-    avg_g  = np.mean(gains[-window:])
-    avg_l  = np.mean(losses[-window:])
-    if avg_l < 1e-10:
-        return 1.0
+    if len(prices) < window + 1: return 0.5
+    d = np.diff(prices)
+    avg_g = np.mean(np.maximum(d, 0.0)[-window:])
+    avg_l = np.mean(np.maximum(-d, 0.0)[-window:])
+    if avg_l < 1e-10: return 1.0
     return float(1.0 - 1.0 / (1.0 + avg_g / avg_l))
 
 def _rolling_macd(prices):
-    if len(prices) < 26:
-        return 0.0
+    if len(prices) < 26: return 0.0
     s  = pd.Series(prices)
-    e12 = s.ewm(span=12, adjust=False).mean()
-    e26 = s.ewm(span=26, adjust=False).mean()
-    macd   = e12 - e26
+    macd   = s.ewm(span=12, adjust=False).mean() - s.ewm(span=26, adjust=False).mean()
     signal = macd.ewm(span=9, adjust=False).mean()
     hist   = float((macd - signal).iloc[-1])
     return float(np.clip(hist / (np.std(prices[-26:]) + 1e-8), -1.0, 1.0))
 
 def _bollinger_pct(prices, window=20):
-    if len(prices) < window:
-        return 0.5
-    s   = pd.Series(prices[-window:])
-    mid = s.mean()
-    std = s.std() + 1e-8
-    return float(np.clip((prices[-1] - (mid - 2 * std)) / (4 * std), 0.0, 1.0))
+    if len(prices) < window: return 0.5
+    s = pd.Series(prices[-window:])
+    return float(np.clip((prices[-1] - (s.mean() - 2 * s.std())) / (4 * s.std() + 1e-8), 0.0, 1.0))
 
 
 # ---------------------------------------------------------------------------
-# Trend Predictor (unchanged from previous version)
+# Trend Predictor
 # ---------------------------------------------------------------------------
 
 class TrendPredictor:
@@ -291,9 +274,9 @@ class TrendPredictor:
                 elif "healthcare" in sec or "pharma" in sec: peers = ["SUNPHARMA.NS","DRREDDY.NS","CIPLA.NS"]
                 elif "consumer" in sec:                    peers = ["HINDUNILVR.NS","ITC.NS","TITAN.NS"]
             return [p for p in peers if p != symbol]
-        if "AAPL" in symbol: return ["MSFT", "GOOG", "AMZN"]
-        if "TSLA" in symbol: return ["F", "GM", "RIVN"]
-        return ["SPY", "QQQ"]
+        if "AAPL" in symbol: return ["MSFT","GOOG","AMZN"]
+        if "TSLA" in symbol: return ["F","GM","RIVN"]
+        return ["SPY","QQQ"]
 
     @staticmethod
     def _parse_news(raw_news):
@@ -308,7 +291,80 @@ class TrendPredictor:
         return parsed
 
     @staticmethod
-    def predict(symbol):
+    def _lstm_predict(symbol, hidden_size=50, num_layers=1, learning_rate=0.001,
+                      epochs=20, dropout=0.0, seq_len=20):
+        """LSTM price prediction, accepts evolved or default hyperparams."""
+        try:
+            hist = get_price_history(symbol, period="2y")
+            if hist is None or hist.empty or len(hist) < seq_len + 10:
+                return None
+
+            hist = hist.resample('W').agg({
+                'Open': 'first', 'High': 'max',
+                'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+            }).dropna()
+
+            close = hist['Close']
+            high  = hist['High']
+            low   = hist['Low']
+
+            rsi       = ta.momentum.RSIIndicator(close=close, window=14).rsi()
+            macd_diff = ta.trend.MACD(close=close).macd_diff()
+            bb        = ta.volatility.BollingerBands(close=close, window=20)
+            bb_width  = bb.bollinger_hband() - bb.bollinger_lband()
+            atr       = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
+            sma20     = ta.trend.SMAIndicator(close=close, window=20).sma_indicator()
+            sma_dist  = (close - sma20) / sma20
+            obv       = ta.volume.OnBalanceVolumeIndicator(close=close, volume=hist['Volume']).on_balance_volume()
+
+            df_feat = pd.DataFrame({
+                'Close': close, 'rsi': rsi, 'macd_diff': macd_diff,
+                'bb_width': bb_width, 'atr': atr, 'sma_dist': sma_dist, 'obv': obv
+            }).dropna()
+
+            if len(df_feat) < seq_len + 5:
+                return None
+
+            scaler      = MinMaxScaler(feature_range=(0, 1))
+            data_scaled = scaler.fit_transform(df_feat.values)
+            input_size  = data_scaled.shape[1]
+
+            X, y = [], []
+            for i in range(len(data_scaled) - seq_len):
+                X.append(data_scaled[i:i + seq_len])
+                y.append(data_scaled[i + seq_len, 0])
+
+            X = torch.tensor(np.array(X), dtype=torch.float32)
+            y = torch.tensor(np.array(y).reshape(-1, 1), dtype=torch.float32)
+
+            model     = LSTMModel(input_size=input_size, hidden_size=hidden_size,
+                                  num_layers=num_layers, dropout=dropout)
+            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+            criterion = nn.MSELoss()
+
+            model.train()
+            for _ in range(epochs):
+                optimizer.zero_grad()
+                loss = criterion(model(X), y)
+                loss.backward()
+                optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                last_seq = torch.tensor(data_scaled[-seq_len:], dtype=torch.float32).unsqueeze(0)
+                pred_scaled = model(last_seq).item()
+
+            dummy = np.zeros((1, input_size))
+            dummy[0, 0] = pred_scaled
+            predicted_price = scaler.inverse_transform(dummy)[0, 0]
+            return float(predicted_price)
+
+        except Exception:
+            return None
+
+    @staticmethod
+    def predict(symbol, hidden_size=50, num_layers=1, learning_rate=0.001,
+                epochs=20, dropout=0.0, seq_len=20, hyperparams_source="default"):
         try:
             hist_daily  = get_price_history(symbol, period="6mo")
             hist_weekly = get_price_history(symbol, period="1y")
@@ -316,6 +372,7 @@ class TrendPredictor:
                 hist_weekly = hist_weekly.resample("W").last().tail(30)
             if hist_daily is None or hist_daily.empty:
                 return {"error": f"No data found for {symbol}."}
+
             info   = get_ticker_info(symbol)
             sector = info.get("sector", info.get("sic_description", ""))
 
@@ -339,11 +396,11 @@ class TrendPredictor:
             except Exception:
                 news = []
             news_text = "\n".join([f"- {n['title']} ({n['publisher']})" for n in news])
+
             peers = TrendPredictor.get_peers(symbol, sector)
             peer_data, peer_history = [], {}
             fd = financials.copy(); fd["Symbol"] = symbol
-            peer_data.append(fd)
-            peer_history[symbol] = hist_daily["Close"].tolist()
+            peer_data.append(fd); peer_history[symbol] = hist_daily["Close"].tolist()
             for p in peers:
                 try:
                     ph = get_price_history(p, period="6mo")
@@ -357,6 +414,7 @@ class TrendPredictor:
 
             if len(hist_daily) < 50:
                 return {"error": "Not enough historical data."}
+
             close = hist_daily["Close"]; high = hist_daily["High"]
             low   = hist_daily["Low"];   volume = hist_daily["Volume"]
 
@@ -369,10 +427,11 @@ class TrendPredictor:
             bb_upper  = float(bb.bollinger_hband().iloc[-1])
             bb_lower  = float(bb.bollinger_lband().iloc[-1])
             bb_mid    = float(bb.bollinger_mavg().iloc[-1])
-            current_atr = float(ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range().iloc[-1])
-            sma_50  = float(ta.trend.SMAIndicator(close=close, window=50).sma_indicator().iloc[-1])
+            current_atr = float(ta.volatility.AverageTrueRange(
+                high=high, low=low, close=close, window=14).average_true_range().iloc[-1])
+            sma_50      = float(ta.trend.SMAIndicator(close=close, window=50).sma_indicator().iloc[-1])
             sma_200_val = ta.trend.SMAIndicator(close=close, window=200).sma_indicator().iloc[-1]
-            sma_200 = float(sma_200_val) if not pd.isna(sma_200_val) else None
+            sma_200     = float(sma_200_val) if not pd.isna(sma_200_val) else None
             recent_close = float(close.iloc[-1])
 
             signals = []
@@ -385,23 +444,32 @@ class TrendPredictor:
             if recent_close > bb_upper:            signals.append("Above Bollinger Upper (Overbought)")
             if recent_close < bb_lower:            signals.append("Below Bollinger Lower (Oversold)")
 
-            bv = sum(1 for s in signals if "Bullish" in s or "Oversold" in s)
-            be = sum(1 for s in signals if "Bearish" in s or "Overbought" in s)
-            if bv > be:     trend = "UP";      change_pct = np.random.uniform(0.01, 0.05)
-            elif be > bv:   trend = "DOWN";    change_pct = np.random.uniform(-0.05, -0.01)
-            else:           trend = "NEUTRAL"; change_pct = np.random.uniform(-0.005, 0.005)
-            predicted_price = recent_close * (1 + change_pct)
+            lstm_price = TrendPredictor._lstm_predict(
+                symbol, hidden_size=hidden_size, num_layers=num_layers,
+                learning_rate=learning_rate, epochs=epochs,
+                dropout=dropout, seq_len=seq_len
+            )
 
-            prompt = f"""Analyze {symbol} (Sector: {sector}).
-TECHNICAL: Price={recent_close}, RSI={current_rsi:.2f}, MACD={current_macd:.4f},
-Signal={current_signal:.4f}, SMA50={sma_50:.2f}, SMA200={f'{sma_200:.2f}' if sma_200 else 'N/A'},
-BB_Upper={bb_upper:.2f}, BB_Lower={bb_lower:.2f}, ATR={current_atr:.2f},
-Signals={', '.join(signals)}, Trend={trend}
-FUNDAMENTAL: {financials}
-NEWS: {news_text}
-PEERS: {peer_data}
-Provide comprehensive analysis. Reference Bollinger Bands and ATR for volatility."""
-            ai_reasoning = GroqService.chat(prompt)
+            if lstm_price is not None:
+                trend = "UP" if lstm_price > recent_close else ("DOWN" if lstm_price < recent_close else "NEUTRAL")
+            else:
+                bv = sum(1 for s in signals if "Bullish" in s or "Oversold" in s)
+                be = sum(1 for s in signals if "Bearish" in s or "Overbought" in s)
+                trend = "UP" if bv > be else ("DOWN" if be > bv else "NEUTRAL")
+
+            predicted_price = lstm_price if lstm_price is not None else recent_close * 1.001
+
+            ai_reasoning = GroqService.chat(f"""
+            Analyze {symbol} (Sector: {sector}).
+            TECHNICAL: Price={recent_close}, RSI={current_rsi:.2f}, MACD={current_macd:.4f},
+            Signal={current_signal:.4f}, SMA50={sma_50:.2f}, SMA200={f'{sma_200:.2f}' if sma_200 else 'N/A'},
+            BB_Upper={bb_upper:.2f}, BB_Lower={bb_lower:.2f}, ATR={current_atr:.2f},
+            Signals={', '.join(signals)}, Trend={trend}
+            FUNDAMENTAL: {financials}
+            NEWS: {news_text}
+            PEERS: {peer_data}
+            Provide comprehensive analysis. Reference Bollinger Bands and ATR for volatility.
+            """)
 
             return {
                 "symbol": symbol, "current_price": float(recent_close),
@@ -418,6 +486,7 @@ Provide comprehensive analysis. Reference Bollinger Bands and ATR for volatility
                 },
                 "ohlc_data": json.loads(hist_daily.to_json(orient="split", date_format="iso")),
                 "reasoning": ai_reasoning,
+                "hyperparams_source": hyperparams_source,
             }
         except Exception as e:
             return {"error": str(e)}
@@ -436,11 +505,9 @@ class PortfolioOptimizer:
                 hist = get_price_history(t, period="2y")
                 if hist is not None and not hist.empty:
                     frames[t] = hist["Close"]
-            if len(frames) < 2:
-                raise ValueError("Need at least 2 tickers.")
+            if len(frames) < 2: raise ValueError("Need at least 2 tickers.")
             prices  = pd.DataFrame(frames).dropna()
-            if len(prices) < 60:
-                raise ValueError("Not enough data.")
+            if len(prices) < 60: raise ValueError("Not enough data.")
             returns = prices.pct_change().dropna()
 
             if risk_tolerance < 0.34:
@@ -465,15 +532,7 @@ class PortfolioOptimizer:
 
 
 # ============================================================================
-# REINFORCEMENT LEARNING — INDUSTRY-GRADE ENSEMBLE
-# ============================================================================
-# Research basis:
-#   • FinRL (Liu et al., NeurIPS 2020) — ensemble of A2C + PPO + DDPG/TD3
-#   • "Benchmarking RL for Portfolio Optimization" (2024) — A2C top cumulative
-#     reward; TD3 most balanced/diversified; SAC natural entropy bonus
-#   • TD3 with Sortino reward + 0.1% transaction cost (ScienceDirect 2024)
-#   • Volatility regime detection as observation feature
-#   • 45% single-asset hard cap
+# REINFORCEMENT LEARNING — INDUSTRY ENSEMBLE WITH HPO
 # ============================================================================
 
 try:
@@ -499,63 +558,41 @@ except ImportError:
 
 
 MAX_SINGLE_WEIGHT  = 0.45
-TRANSACTION_COST   = 0.001   # 0.1% per trade — standard in FinRL benchmarks
-RISK_FREE_RATE_ANN = 0.05    # annualised, used in Sortino calculation
+TRANSACTION_COST   = 0.001
+RISK_FREE_RATE_ANN = 0.05
 
 
 def _cap_and_renormalize(weights, cap=MAX_SINGLE_WEIGHT):
-    """Iterative cap + renormalise. Guaranteed to converge in ≤ n steps."""
     w = weights.copy()
     for _ in range(len(w)):
         excess = np.maximum(w - cap, 0.0)
-        if excess.sum() < 1e-9:
-            break
+        if excess.sum() < 1e-9: break
         w    = np.minimum(w, cap)
         pool = excess.sum()
         free = w < cap
-        if free.sum() == 0:
-            w[:] = 1.0 / len(w)
-            break
+        if free.sum() == 0: w[:] = 1.0 / len(w); break
         w[free] += pool * (w[free] / w[free].sum())
     total = w.sum()
     return w / total if total > 0 else w
 
 
 def _sortino_ratio(returns_arr, rf_daily=RISK_FREE_RATE_ANN / 252):
-    """
-    Sortino ratio — penalises ONLY downside volatility.
-    More appropriate than Sharpe for skewed financial return distributions.
-    (Research: better reward signal for portfolio RL agents)
-    """
-    if len(returns_arr) < 5:
-        return 0.0
-    excess     = returns_arr - rf_daily
-    downside   = np.minimum(excess, 0.0)
-    downside_std = np.sqrt(np.mean(downside ** 2)) + 1e-8
-    return float(np.mean(excess) / downside_std * np.sqrt(252))
+    if len(returns_arr) < 5: return 0.0
+    excess   = returns_arr - rf_daily
+    downside = np.minimum(excess, 0.0)
+    dd_std   = np.sqrt(np.mean(downside ** 2)) + 1e-8
+    return float(np.mean(excess) / dd_std * np.sqrt(252))
 
 
 def _volatility_regime(returns_arr, window=20):
-    """
-    0 = low vol regime  (rolling std < 1st quartile of history)
-    1 = normal regime
-    2 = high vol regime (rolling std > 3rd quartile of history)
-    Returns normalised value in [0, 1].
-    """
-    if len(returns_arr) < window:
-        return 0.5
+    if len(returns_arr) < window: return 0.5
     recent_vol = np.std(returns_arr[-window:])
     hist_vol   = np.std(returns_arr)
-    if hist_vol < 1e-10:
-        return 0.5
+    if hist_vol < 1e-10: return 0.5
     return float(np.clip(recent_vol / (2.0 * hist_vol), 0.0, 1.0))
 
 
 class ProgressCallback(BaseCallback):
-    """
-    Writes progress JSON to disk every 100 steps.
-    offset_pct / scale_pct allow multiple agents to share one progress bar.
-    """
     def __init__(self, total_timesteps, progress_file, offset_pct=0.0, scale_pct=1.0):
         super().__init__()
         self.total_timesteps = total_timesteps
@@ -566,7 +603,7 @@ class ProgressCallback(BaseCallback):
 
     def _on_step(self):
         self.current_reward += self.locals.get("rewards", [0])[0]
-        raw = min(self.num_timesteps / self.total_timesteps, 1.0)
+        raw     = min(self.num_timesteps / self.total_timesteps, 1.0)
         overall = self.offset_pct + raw * self.scale_pct
         if self.num_timesteps % 100 == 0:
             with open(self.progress_file, "w") as f:
@@ -582,37 +619,17 @@ class ProgressCallback(BaseCallback):
 
 class PortfolioEnv(gym.Env):
     """
-    Industry-grade portfolio environment.
+    Production-grade portfolio environment.
 
-    Observation (per step, normalised)
-    -----------------------------------
-    For each asset:
-      • 30-day daily returns window
-      • 5-day momentum (short trend)
-      • 20-day momentum (medium trend)
-      • Rolling RSI [0,1]
-      • Rolling MACD histogram [-1,1]
-      • Bollinger Band %B [0,1]
-      • Fundamental score [0,1]   ← pre-fetched once
-      • News sentiment [-1,1]     ← Groq-scored headlines
-    Global:
-      • Volatility regime [0,1]   ← rolling std vs history
-      • Current weights (n)
-      • Normalised portfolio value (1)
+    Observation: 30-day returns window + 5-day/20-day momentum + RSI + MACD +
+                 Bollinger %B + fundamental score + news sentiment per asset,
+                 plus current weights and normalised portfolio value + volatility regime.
 
-    Reward (research-backed composite)
-    ------------------------------------
-    Base:   daily portfolio return − transaction costs (0.1% per rebalance)
-    +0.02 × Sortino ratio (penalises only downside vol, not upside)
-    −sector_risk_avg × 0.015 × max_drawdown
-    +0.008 × weight entropy (diversification)
-    −0.005 × concentration² (soft pressure below 45% cap)
-    +0.003 × fundamental alignment
-    +0.003 × sentiment alignment
+    Reward: daily return − transaction cost + Sortino bonus − sector-adjusted
+            drawdown penalty + entropy bonus − concentration penalty +
+            fundamental & sentiment alignment bonuses.
 
-    Constraints
-    -----------
-    Hard 45% cap via _cap_and_renormalize on every step.
+    Constraints: Hard 45% single-asset cap.
     """
 
     WINDOW          = 30
@@ -634,7 +651,6 @@ class PortfolioEnv(gym.Env):
         self._sentiments   = np.array([ticker_features.get(t, {}).get("news_sentiment",    0.0) for t in self.tickers], dtype=np.float32)
         self._sector_risks = np.array([ticker_features.get(t, {}).get("sector_risk",       1.0) for t in self.tickers], dtype=np.float32)
 
-        # obs: 30n + 5n_dynamic + 2n_static + n_weights + 1_value + 1_regime
         obs_size = self.WINDOW * self.n_assets + 7 * self.n_assets + self.n_assets + 2
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
         self.action_space      = spaces.Box(low=0.0, high=1.0, shape=(self.n_assets,), dtype=np.float32)
@@ -658,7 +674,6 @@ class PortfolioEnv(gym.Env):
             recent = np.vstack([pad, recent])
         mom5  = self._mom5[i]  if i < len(self._mom5)  else np.zeros(self.n_assets)
         mom20 = self._mom20[i] if i < len(self._mom20) else np.zeros(self.n_assets)
-
         lb = min(i, 60)
         rsi_v  = np.zeros(self.n_assets, dtype=np.float32)
         macd_v = np.zeros(self.n_assets, dtype=np.float32)
@@ -668,11 +683,8 @@ class PortfolioEnv(gym.Env):
             rsi_v[j]  = _rolling_rsi(sl)
             macd_v[j] = _rolling_macd(sl)
             bb_v[j]   = _bollinger_pct(sl)
-
-        # Volatility regime (global market feature)
-        all_rets = self.returns.values[:i].mean(axis=1)   # equal-weight market return
+        all_rets = self.returns.values[:i].mean(axis=1)
         regime   = _volatility_regime(all_rets)
-
         return np.concatenate([
             recent.flatten(), mom5, mom20,
             rsi_v, macd_v, bb_v,
@@ -682,7 +694,6 @@ class PortfolioEnv(gym.Env):
         ]).astype(np.float32)
 
     def step(self, action):
-        # Normalise → cap
         action = np.clip(action, 0, None)
         s      = action.sum()
         raw_w  = action / s if s > 0 else np.ones(self.n_assets) / self.n_assets
@@ -691,48 +702,32 @@ class PortfolioEnv(gym.Env):
         if self.current_step >= len(self.returns):
             return self._get_obs(), 0.0, True, False, {}
 
-        # Transaction cost (0.1% × total weight turnover)
         turnover    = float(np.sum(np.abs(self.weights - self.prev_weights)))
         tc_cost     = TRANSACTION_COST * turnover
         self.prev_weights = self.weights.copy()
 
-        # Daily P&L
         daily_rets       = self.returns.iloc[self.current_step].values
         portfolio_return = float(np.dot(self.weights, daily_rets)) - tc_cost
         self.portfolio_value *= (1 + portfolio_return)
         self.portfolio_history.append(self.portfolio_value)
 
-        # Drawdown
         if self.portfolio_value > self.peak_value:
             self.peak_value = self.portfolio_value
         drawdown = (self.peak_value - self.portfolio_value) / (self.peak_value + 1e-8)
 
-        # Composite reward
-        reward = portfolio_return  # base (includes transaction cost)
-
+        reward = portfolio_return
         if len(self.portfolio_history) >= 10:
             hist_arr = np.array(self.portfolio_history[-60:])
             rets_arr = np.diff(hist_arr) / (hist_arr[:-1] + 1e-8)
-            # Sortino (research: better than Sharpe for skewed fin returns)
-            sortino  = _sortino_ratio(rets_arr)
-            reward  += 0.02 * sortino
+            reward  += 0.02 * _sortino_ratio(rets_arr)
 
-        # Sector-risk-adjusted drawdown penalty
         avg_sector_risk = float(np.dot(self.weights, self._sector_risks))
         reward -= avg_sector_risk * 0.015 * drawdown
-
-        # Entropy bonus (diversification)
         entropy = -float(np.sum(self.weights * np.log(self.weights + 1e-8)))
         reward += 0.008 * entropy
-
-        # Concentration penalty (soft pressure below hard cap)
         concentration = float(np.sum(np.maximum(self.weights - 0.30, 0.0) ** 2))
         reward -= 0.005 * concentration
-
-        # Fundamental alignment bonus
         reward += 0.003 * float(np.dot(self.weights, self._fund_scores - 0.5))
-
-        # Sentiment alignment bonus
         reward += 0.003 * float(np.dot(self.weights, self._sentiments))
 
         self.current_step += 1
@@ -744,91 +739,136 @@ class PortfolioEnv(gym.Env):
 
 
 # ---------------------------------------------------------------------------
-# Ensemble Agent Factory
+# Agent factory functions — accept evolved hyperparams from HPO
 # ---------------------------------------------------------------------------
 
-def _make_a2c(env, timesteps):
+def _make_a2c(env, hyperparams=None):
     """
-    A2C — best cumulative rewards in 2024 FinRL benchmarks.
-    On-policy, fast, good for non-stationary markets.
+    A2C — on-policy, best cumulative returns (FinRL 2024 benchmark).
+    Uses evolved hyperparams from GA if available, falls back to research defaults.
     """
+    hp = hyperparams or {}
     return A2C(
-        "MlpPolicy", env,
-        verbose       = 0,
-        learning_rate = 7e-4,
-        n_steps       = 5,
-        gamma         = 0.99,
-        gae_lambda    = 1.0,
-        ent_coef      = 0.01,
+        "MlpPolicy", env, verbose=0,
+        learning_rate = hp.get("learning_rate", 7e-4),
+        n_steps       = int(hp.get("n_steps",   5)),
+        gamma         = hp.get("gamma",         0.99),
+        gae_lambda    = hp.get("gae_lambda",     1.0),
+        ent_coef      = hp.get("ent_coef",       0.01),
         policy_kwargs = dict(net_arch=[dict(pi=[256, 256], vf=[256, 256])]),
     )
 
 
-def _make_sac(env, n_assets):
+def _make_sac(env, n_assets, hyperparams=None):
     """
-    SAC — built-in entropy maximisation promotes diversification naturally.
-    Off-policy, sample efficient, great for continuous portfolio weights.
+    SAC — off-policy, built-in entropy bonus promotes diversification.
+    Uses evolved hyperparams from GA if available, falls back to research defaults.
     """
+    hp = hyperparams or {}
     return SAC(
-        "MlpPolicy", env,
-        verbose       = 0,
-        learning_rate = 3e-4,
+        "MlpPolicy", env, verbose=0,
+        learning_rate = hp.get("learning_rate",  3e-4),
         buffer_size   = 100_000,
-        batch_size    = 256,
-        tau           = 0.005,
-        gamma         = 0.99,
-        ent_coef      = "auto",   # auto-tune entropy temperature
+        batch_size    = int(hp.get("batch_size", 256)),
+        tau           = hp.get("tau",             0.005),
+        gamma         = hp.get("gamma",           0.99),
+        ent_coef      = hp.get("init_ent_coef",   "auto"),
         policy_kwargs = dict(net_arch=[256, 256]),
     )
 
 
-def _make_td3(env, n_assets):
+def _make_td3(env, n_assets, hyperparams=None):
     """
-    TD3 — most balanced/diversified holdings per 2024 benchmarks.
-    Twin critics eliminate overestimation bias. Best for risk-sensitive tasks.
-    Includes action noise for better exploration.
+    TD3 — twin critics, most balanced holdings (FinRL 2024 benchmark).
+    Uses evolved hyperparams from GA if available, falls back to research defaults.
     """
+    hp           = hyperparams or {}
+    noise_sigma  = hp.get("noise_sigma", 0.1)
     action_noise = NormalActionNoise(
         mean  = np.zeros(n_assets),
-        sigma = 0.1 * np.ones(n_assets),
+        sigma = noise_sigma * np.ones(n_assets),
     )
     return TD3(
-        "MlpPolicy", env,
-        verbose       = 0,
-        learning_rate = 1e-3,
+        "MlpPolicy", env, verbose=0,
+        learning_rate = hp.get("learning_rate",  1e-3),
         buffer_size   = 100_000,
-        batch_size    = 256,
-        tau           = 0.005,
-        gamma         = 0.99,
+        batch_size    = int(hp.get("batch_size", 256)),
+        tau           = hp.get("tau",             0.005),
+        gamma         = hp.get("gamma",           0.99),
         action_noise  = action_noise,
         policy_kwargs = dict(net_arch=[256, 256]),
     )
 
 
+# ---------------------------------------------------------------------------
+# HPO cache — stores evolved hyperparams per ticker-set in rl_models dir
+# ---------------------------------------------------------------------------
+
+def _ticker_hash(tickers):
+    """Stable hash for a sorted list of tickers — used as cache key."""
+    key = "_".join(sorted([t.upper() for t in tickers]))
+    return hashlib.md5(key.encode()).hexdigest()[:12]
+
+
 class RLPortfolioAgent:
     """
-    FinRL-style Ensemble Agent.
+    FinRL-style Ensemble Agent with Genetic Algorithm HPO.
 
-    Trains three independent agents:
-      1. A2C  — on-policy, highest cumulative returns
-      2. SAC  — off-policy, entropy bonus for diversification
-      3. TD3  — off-policy, twin critics, most balanced holdings
+    Pipeline:
+    ─────────
+    1. Fetch & align price data (US + Indian tickers, timezone normalised)
+    2. Pre-fetch fundamentals + AI-scored news sentiment per ticker
+    3. [HPO phase — if timesteps >= 10000]
+       Run compact GA (4 pop × 3 gen × 1500-step evals) per agent
+       to evolve learning_rate, n_steps/batch_size, gamma, tau/gae_lambda,
+       ent_coef/noise_sigma. Cache results to disk by ticker-set hash.
+    4. Full training using evolved hyperparams:
+       A2C (35%) + SAC (30%) + TD3 (35%)
+    5. Ensemble allocation = weighted average, re-capped at 45%
 
-    Final allocation = weighted average of all three predictions:
-      weights = 0.35×A2C + 0.30×SAC + 0.35×TD3
-
-    Research: Liu et al. NeurIPS 2020 show ensemble strategy outperforms
-    any single agent and the market index on Dow Jones 30.
+    Research basis:
+      FinRL (Liu et al., NeurIPS 2020) — ensemble strategy
+      Sortino reward + 0.1% transaction costs
+      Sector-risk-adjusted drawdown penalty
     """
-
-    AGENT_WEIGHTS = {"A2C": 0.35, "SAC": 0.30, "TD3": 0.35}
 
     MODEL_DIR    = os.path.join(os.path.dirname(__file__), "rl_models")
     PROGRESS_DIR = os.path.join(os.path.dirname(__file__), "rl_progress")
+    HPO_CACHE_DIR = os.path.join(os.path.dirname(__file__), "rl_hpo_cache")
+
+    AGENT_WEIGHTS = {"A2C": 0.35, "SAC": 0.30, "TD3": 0.35}
+
+    # HPO is run when timesteps >= this threshold
+    HPO_MIN_TIMESTEPS = 10000
 
     def __init__(self):
         os.makedirs(self.MODEL_DIR,    exist_ok=True)
         os.makedirs(self.PROGRESS_DIR, exist_ok=True)
+        os.makedirs(self.HPO_CACHE_DIR, exist_ok=True)
+
+    # ── HPO cache ─────────────────────────────────────────────────────────────
+
+    def _hpo_cache_path(self, tickers):
+        return os.path.join(self.HPO_CACHE_DIR, f"{_ticker_hash(tickers)}.json")
+
+    def _load_hpo_cache(self, tickers):
+        """Load cached evolved hyperparams if they exist. Returns dict or None."""
+        path = self._hpo_cache_path(tickers)
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                return data  # {"A2C": {...}, "SAC": {...}, "TD3": {...}}
+            except Exception:
+                pass
+        return None
+
+    def _save_hpo_cache(self, tickers, hpo_results):
+        path = self._hpo_cache_path(tickers)
+        with open(path, "w") as f:
+            json.dump(hpo_results, f, indent=2)
+
+    # ── Data fetch ────────────────────────────────────────────────────────────
 
     def _fetch_data(self, tickers, period="2y"):
         frames = {}
@@ -847,17 +887,23 @@ class RLPortfolioAgent:
             raise ValueError("Not enough aligned data. Check tickers.")
         return df
 
-    def _write_progress(self, progress_file, progress, status, timestep=0,
-                        total_timesteps=0, reward=0, extra=None):
+    # ── Progress writer ───────────────────────────────────────────────────────
+
+    def _write_progress(self, progress_file, progress, status,
+                        timestep=0, total_timesteps=0, reward=0, extra=None):
         data = {
-            "progress": round(progress, 1), "status": status,
-            "timestep": timestep, "total_timesteps": total_timesteps,
-            "reward":   round(float(reward), 4),
+            "progress":        round(progress, 1),
+            "status":          status,
+            "timestep":        timestep,
+            "total_timesteps": total_timesteps,
+            "reward":          round(float(reward), 4),
         }
         if extra:
             data.update(extra)
         with open(progress_file, "w") as f:
             json.dump(data, f)
+
+    # ── Training ──────────────────────────────────────────────────────────────
 
     def train(self, tickers, timesteps=10000, session_id="default"):
         if not GYM_AVAILABLE or not SB3_AVAILABLE:
@@ -871,33 +917,116 @@ class RLPortfolioAgent:
         self._write_progress(progress_file, 0, "fetching_fundamentals", total_timesteps=timesteps)
         ticker_features = fetch_ticker_features(tickers)
 
-        # Each of 3 agents gets 1/3 of the progress bar
-        agent_share = 1.0 / 3.0
+        # ── HPO Phase ─────────────────────────────────────────────────────────
+        # Run only when timesteps >= 10000 (Medium or Thorough)
+        # Check cache first — if the same ticker set was trained before,
+        # reuse the evolved hyperparams without running GA again.
+        evolved_hyperparams = None
+
+        if timesteps >= self.HPO_MIN_TIMESTEPS:
+            # Try cache first
+            cached_hpo = self._load_hpo_cache(tickers)
+            if cached_hpo:
+                evolved_hyperparams = cached_hpo
+                self._write_progress(
+                    progress_file, 5, "hpo_loaded_from_cache",
+                    total_timesteps=timesteps,
+                    extra={"hpo_source": "cache", "hpo_agents": list(cached_hpo.keys())}
+                )
+            else:
+                # Run compact GA HPO for all 3 agents
+                # Each agent: 4 chromosomes × 3 generations × 1500 eval steps
+                # HPO occupies the first 20% of the progress bar
+                self._write_progress(
+                    progress_file, 2, "hpo_running",
+                    total_timesteps=timesteps,
+                    extra={"hpo_agents": ["A2C", "SAC", "TD3"],
+                           "hpo_pop_size": 4, "hpo_generations": 3}
+                )
+                try:
+                    from .evolution import run_rl_hpo_all_agents
+                    hpo_results = run_rl_hpo_all_agents(
+                        price_data, ticker_features,
+                        pop_size=3, generations=2, eval_timesteps=500
+                    )
+                    # Extract just the hyperparams dict per agent
+                    evolved_hyperparams = {
+                        agent: res["hyperparams"]
+                        for agent, res in hpo_results.items()
+                        if res.get("hyperparams") is not None
+                    }
+                    # Save HPO sortino scores for display
+                    hpo_sortino_summary = {
+                        agent: round(res.get("sortino", 0.0), 4)
+                        for agent, res in hpo_results.items()
+                    }
+                    # Cache for future runs
+                    self._save_hpo_cache(tickers, evolved_hyperparams)
+                    self._write_progress(
+                        progress_file, 20, "hpo_complete",
+                        total_timesteps=timesteps,
+                        extra={
+                            "hpo_source":          "evolved",
+                            "hpo_sortino_summary": hpo_sortino_summary,
+                            "evolved_hyperparams": evolved_hyperparams,
+                        }
+                    )
+                except Exception as hpo_err:
+                    # HPO failure is non-fatal — fall back to defaults
+                    evolved_hyperparams = None
+                    self._write_progress(
+                        progress_file, 20, "hpo_skipped",
+                        total_timesteps=timesteps,
+                        extra={"hpo_error": str(hpo_err)}
+                    )
+
+        # ── Full Training Phase ────────────────────────────────────────────────
+        # HPO used 0–20% of progress bar; training uses 20–99%
+        # Each of 3 agents gets 1/3 of the remaining 79%
+        hpo_offset   = 20.0 if evolved_hyperparams is not None else 0.0
+        train_range  = 99.0 - hpo_offset
+        agent_share  = train_range / 3.0 / 100.0  # as fraction
 
         trained_models = {}
         all_rewards    = {}
 
-        for idx, (agent_name, offset) in enumerate([("A2C", 0.0), ("SAC", agent_share), ("TD3", 2 * agent_share)]):
+        agent_order = [
+            ("A2C", 0),
+            ("SAC", agent_share),
+            ("TD3", 2 * agent_share),
+        ]
+
+        for agent_name, rel_offset in agent_order:
+            abs_offset = (hpo_offset + rel_offset * 100) / 100.0
+
             self._write_progress(
                 progress_file,
-                offset * 100,
+                hpo_offset + rel_offset * 100,
                 f"training_{agent_name}",
                 total_timesteps=timesteps,
-                extra={"current_agent": agent_name, "agent_index": idx + 1}
+                extra={
+                    "current_agent": agent_name,
+                    "using_hpo":     evolved_hyperparams is not None,
+                }
             )
 
+            hp = (evolved_hyperparams or {}).get(agent_name, None)
+
             env      = DummyVecEnv([lambda: PortfolioEnv(price_data, ticker_features)])
-            callback = ProgressCallback(timesteps, progress_file, offset_pct=offset, scale_pct=agent_share)
+            callback = ProgressCallback(
+                timesteps, progress_file,
+                offset_pct=abs_offset,
+                scale_pct=agent_share,
+            )
 
             if agent_name == "A2C":
-                model = _make_a2c(env, timesteps)
+                model = _make_a2c(env, hyperparams=hp)
             elif agent_name == "SAC":
-                # SAC needs non-vectorised env for some versions
                 single_env = PortfolioEnv(price_data, ticker_features)
-                model = _make_sac(single_env, len(tickers))
-            else:  # TD3
+                model = _make_sac(single_env, len(tickers), hyperparams=hp)
+            else:
                 single_env = PortfolioEnv(price_data, ticker_features)
-                model = _make_td3(single_env, len(tickers))
+                model = _make_td3(single_env, len(tickers), hyperparams=hp)
 
             model.learn(total_timesteps=timesteps, callback=callback)
             model.save(os.path.join(self.MODEL_DIR, f"{session_id}_{agent_name}"))
@@ -907,33 +1036,35 @@ class RLPortfolioAgent:
 
         self._write_progress(progress_file, 99, "evaluating", total_timesteps=timesteps)
 
-        # Evaluate each agent and collect final weights
-        agent_allocations    = {}
-        agent_pf_histories   = {}
+        # ── Evaluate & Ensemble ────────────────────────────────────────────────
+        agent_allocations     = {}
+        agent_pf_histories    = {}
         agent_portfolio_dates = {}
 
         for agent_name, model in trained_models.items():
-            alloc, pf_hist, pf_dates = self._evaluate_single(model, price_data, ticker_features)
-            agent_allocations[agent_name]    = alloc
-            agent_pf_histories[agent_name]   = pf_hist
+            alloc, pf_hist, pf_dates = self._evaluate_single(
+                model, price_data, ticker_features
+            )
+            agent_allocations[agent_name]     = alloc
+            agent_pf_histories[agent_name]    = pf_hist
             agent_portfolio_dates[agent_name] = pf_dates
 
-        # Ensemble: weighted average of allocations
+        # Weighted average of all three agent allocations
         ensemble_weights = np.zeros(len(tickers))
         for agent_name, w in self.AGENT_WEIGHTS.items():
             if agent_name in agent_allocations:
-                alloc_arr = np.array([agent_allocations[agent_name].get(t, 0.0) for t in tickers])
-                ensemble_weights += w * alloc_arr
-        # Re-normalise and re-cap
-        ensemble_weights = _cap_and_renormalize(ensemble_weights / (ensemble_weights.sum() + 1e-8))
-        ensemble_alloc   = {t: round(float(w), 4) for t, w in zip(tickers, ensemble_weights)}
+                arr = np.array([agent_allocations[agent_name].get(t, 0.0) for t in tickers])
+                ensemble_weights += w * arr
 
-        # Use A2C portfolio history as primary (best cumulative returns)
-        primary_agent    = "A2C"
-        portfolio_history = agent_pf_histories[primary_agent]
-        portfolio_dates   = agent_portfolio_dates[primary_agent]
-        final_value       = portfolio_history[-1] if portfolio_history else 100000
-        total_return      = ((final_value / 100000) - 1) * 100
+        ensemble_weights = _cap_and_renormalize(
+            ensemble_weights / (ensemble_weights.sum() + 1e-8)
+        )
+        ensemble_alloc = {t: round(float(w), 4) for t, w in zip(tickers, ensemble_weights)}
+
+        primary_pf    = agent_pf_histories["A2C"]
+        primary_dates = agent_portfolio_dates["A2C"]
+        final_value   = primary_pf[-1] if primary_pf else 100000
+        total_return  = ((final_value / 100000) - 1) * 100
 
         # Per-agent performance metrics
         agent_metrics = {}
@@ -950,20 +1081,26 @@ class RLPortfolioAgent:
                 }
 
         result = {
-            "progress": 100, "status": "complete",
-            "timestep": timesteps, "total_timesteps": timesteps,
-            "reward":   float(np.mean(list(all_rewards.values()))),
-            "allocation":        ensemble_alloc,
-            "portfolio_history": portfolio_history,
-            "portfolio_dates":   portfolio_dates,
-            "tickers":           tickers,
-            "ticker_features":   {
+            "progress":           100,
+            "status":             "complete",
+            "timestep":           timesteps,
+            "total_timesteps":    timesteps,
+            "reward":             float(np.mean(list(all_rewards.values()))),
+            "allocation":         ensemble_alloc,
+            "portfolio_history":  primary_pf,
+            "portfolio_dates":    primary_dates,
+            "tickers":            tickers,
+            "ticker_features":    {
                 t: {k: round(v, 3) for k, v in feats.items()}
                 for t, feats in ticker_features.items()
             },
-            "agent_metrics":     agent_metrics,
-            "final_value":       final_value,
-            "total_return":      total_return,
+            "agent_metrics":      agent_metrics,
+            "final_value":        final_value,
+            "total_return":       total_return,
+            # HPO provenance — passed to frontend
+            "hpo_used":           evolved_hyperparams is not None,
+            "hpo_source":         "evolved" if evolved_hyperparams is not None else "defaults",
+            "evolved_hyperparams": evolved_hyperparams or {},
         }
         with open(progress_file, "w") as f:
             json.dump(result, f)
@@ -1002,6 +1139,9 @@ class RLPortfolioAgent:
             return {"progress": 0, "status": "not_started"}
         with open(progress_file) as f:
             return json.load(f)
+
+    def _ticker_hash_for_response(self, tickers):
+        return _ticker_hash(tickers)
 
 
 _rl_agent = RLPortfolioAgent()
