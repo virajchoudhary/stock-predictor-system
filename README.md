@@ -70,7 +70,7 @@ python manage.py runserver 0.0.0.0:8000
 Open a new terminal window at the **root of the `QuantVis` project** (not inside the backend folder). We will use the backend's virtual environment to launch Streamlit.
 
 ```bash
-# Ensure you are in the root directory: /Users/mananbansal/Desktop/QuantVis
+# Ensure you are in the root directory: c:\stock price predictor
 ./backend/venv/bin/streamlit run frontend/app.py --server.port 8501
 ```
 

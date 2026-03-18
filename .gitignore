@@ -9,3 +9,6 @@ celerybeat-schedule
 celerybeat-schedule-shm
 celerybeat-schedule-wal
 portfolio_report.html
+backend/db.sqlite3
+frontend/venv/
+

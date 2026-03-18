@@ -40,7 +40,7 @@ dirs_to_delete = [
     "quant_testing"
 ]
 
-base_dir = r"c:\QuantVis"
+base_dir = r"c:\stock price predictor"
 
 deleted = []
 not_found = []
