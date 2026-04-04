@@ -546,6 +546,10 @@ except ImportError:
         GYM_AVAILABLE = True
     except ImportError:
         GYM_AVAILABLE = False
+        import types
+        gym = types.ModuleType('gym')
+        gym.Env = object
+        spaces = None
 
 try:
     from stable_baselines3 import PPO, SAC, TD3, A2C
@@ -555,6 +559,10 @@ try:
     SB3_AVAILABLE = True
 except ImportError:
     SB3_AVAILABLE = False
+    BaseCallback = object
+    DummyVecEnv = None
+    NormalActionNoise = None
+    PPO = SAC = TD3 = A2C = None
 
 
 MAX_SINGLE_WEIGHT  = 0.45
