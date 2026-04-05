@@ -6,6 +6,10 @@ import yfinance as yf
 from scipy.optimize import minimize
 from datetime import datetime, timedelta
 import requests
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from components.style import inject_css, page_header, section_label
 
 # ---------------------------------------------------------------------------
 # NSE Live Data — jugaad-data (replaces nsepython scraper)
@@ -23,12 +27,13 @@ except ImportError:
 # Page Config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Options Analysis - QuantVis",
-    page_icon="📈",
+    page_title="Options — QuantVis",
+    page_icon="▲",
     layout="wide",
 )
 
-st.title("🛡️ Options Mispricing Detector (SABR Model)")
+inject_css()
+page_header("Derivatives Research", "Options Analysis", accent="#BF7FFF")
 
 # ---------------------------------------------------------------------------
 # Utility Functions
@@ -53,8 +58,8 @@ def fetch_option_chain(symbol):
     if JUGAAD_AVAILABLE and symbol.upper() in [s.upper() for s in nifty_symbols + banknifty_symbols]:
         index_name = "BANKNIFTY" if symbol.upper() in [s.upper() for s in banknifty_symbols] else "NIFTY"
         try:
-            payload   = _nse.live_option_chain(index_name)
-            records   = payload.get("records", {})
+            payload    = _nse.live_option_chain(index_name)
+            records    = payload.get("records", {})
             spot_price = records.get("underlyingValue", 24000.0)
             expiry_list = records.get("expiryDates", [])
 
@@ -81,10 +86,9 @@ def fetch_option_chain(symbol):
 
         except Exception as e:
             st.warning(
-                f"⚠️ jugaad-data live fetch failed for {index_name}: `{e}`. "
+                f"jugaad-data live fetch failed for {index_name}: `{e}`. "
                 "Falling back to simulation mode."
             )
-            # Fall through to simulation below
 
     # ------------------------------------------------------------------
     # 2. yfinance for US / global symbols
@@ -94,7 +98,6 @@ def fetch_option_chain(symbol):
         expirations = ticker.options
 
         if not expirations:
-            # No options data — use simulation for Indian indices
             if any(x in symbol.upper() for x in ["NSE", ".NS", "NIFTY", "NSEI"]):
                 return _simulate_nifty_chain(symbol)
             return None, None, None
@@ -108,7 +111,6 @@ def fetch_option_chain(symbol):
         return chain.calls, current_price, expiry
 
     except Exception:
-        # Last-resort simulation for NSE
         if any(x in symbol.upper() for x in ["NSE", ".NS", "NIFTY", "NSEI"]):
             return _simulate_nifty_chain(symbol)
         return None, None, None
@@ -123,7 +125,6 @@ def _simulate_nifty_chain(symbol):
     expiry        = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
     strikes       = np.arange(current_price * 0.95, current_price * 1.05, 50)
 
-    # Realistic volatility smile: ATM IV + skew + curvature
     atm_iv  = 0.15
     log_m   = np.log(strikes / current_price)
     mkt_ivs = atm_iv - 0.5 * log_m + 2.0 * log_m ** 2
@@ -202,10 +203,7 @@ def calibrate_sabr(strikes, market_ivs, f, t):
 # Layout
 # ---------------------------------------------------------------------------
 
-tab_mispricing, tab_surface = st.tabs([
-    "🚀 Mispricing (SABR)",
-    "📊 Volatility Surface",
-])
+tab_mispricing, tab_surface = st.tabs(["MISPRICING (SABR)", "VOLATILITY SURFACE"])
 
 # ---------------------------------------------------------------------------
 # TAB 1 — SABR Mispricing
@@ -220,10 +218,10 @@ with tab_mispricing:
             help="US: SPY, AAPL, QQQ  |  India: NIFTY or NIFTY 50 (uses jugaad-data live NSE feed)",
         )
         if JUGAAD_AVAILABLE:
-            st.caption("✅ jugaad-data installed — NIFTY live data available.")
+            st.caption("jugaad-data installed — NIFTY live data available.")
         else:
             st.caption(
-                "⚠️ jugaad-data not installed. "
+                "jugaad-data not installed. "
                 "Run `pip install jugaad-data` for live NSE options. "
                 "NIFTY will use simulation mode."
             )
@@ -236,16 +234,15 @@ with tab_mispricing:
 
             if is_simulated:
                 st.warning(
-                    f"⚠️ **SIMULATION MODE** — Live data unavailable for `{symbol}`. "
+                    f"Simulation mode — live data unavailable for `{symbol}`. "
                     "Displaying a realistic Nifty volatility smile to demonstrate SABR calibration."
                 )
             else:
-                st.success(f"✅ **LIVE / DELAYED DATA** — Option chain fetched for `{symbol}`.")
+                st.success(f"Live / delayed data — option chain fetched for `{symbol}`.")
 
             with col_status:
                 st.metric("Spot Price", f"₹{spot_price:,.2f}", f"Expiry: {expiry_date}")
 
-            # Filter near-the-money strikes
             upper = spot_price * 1.10
             lower = spot_price * 0.90
             liquid_calls = calls_df[
@@ -281,7 +278,7 @@ with tab_mispricing:
                     liquid_calls["Mispricing"] = liquid_calls["impliedVolatility"] - liquid_calls["SABR_IV"]
 
                 except Exception as e:
-                    st.error(f"Calibration Failed: {e}")
+                    st.error(f"Calibration failed: {e}")
                     st.stop()
 
                 def classify(row):
@@ -292,38 +289,53 @@ with tab_mispricing:
 
                 liquid_calls["Signal"] = liquid_calls.apply(classify, axis=1)
 
-                st.subheader("SABR Calibration Result")
-                st.write(
-                    f"**Alpha**: {alpha:.4f} | **Beta**: 0.5 (Fixed) | "
-                    f"**Rho**: {rho:.4f} | **Nu**: {nu:.4f}"
-                )
+                section_label("SABR Calibration Result")
+                st.markdown(f"""
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:0.72rem;color:#7A9BB5;
+                background:#0A0E14;border:1px solid #1E2D3D;padding:0.75rem 1rem;border-radius:2px;
+                display:inline-block;">
+                    Alpha&nbsp;<span style="color:#E8F4FD;">{alpha:.4f}</span>
+                    &nbsp;&nbsp;Beta&nbsp;<span style="color:#E8F4FD;">0.5</span>&nbsp;<span style="font-size:0.55rem;">(fixed)</span>
+                    &nbsp;&nbsp;Rho&nbsp;<span style="color:#E8F4FD;">{rho:.4f}</span>
+                    &nbsp;&nbsp;Nu&nbsp;<span style="color:#E8F4FD;">{nu:.4f}</span>
+                </div>
+                """, unsafe_allow_html=True)
 
                 fig_smile = go.Figure()
                 fig_smile.add_trace(go.Scatter(
                     x=liquid_calls["strike"], y=liquid_calls["impliedVolatility"],
                     mode="markers", name="Market IV",
+                    marker=dict(color="#00D4FF", size=6, opacity=0.85),
                 ))
                 fig_smile.add_trace(go.Scatter(
                     x=liquid_calls["strike"], y=liquid_calls["SABR_IV"],
                     mode="lines", name="SABR Fair IV",
-                    line=dict(color="orange"),
+                    line=dict(color="#FFB800", width=2),
                 ))
                 fig_smile.update_layout(
-                    title=f"Volatility Smile: {symbol} ({expiry_date})",
-                    xaxis_title="Strike Price",
-                    yaxis_title="Implied Volatility",
+                    paper_bgcolor="#080C10", plot_bgcolor="#080C10",
+                    font=dict(family="IBM Plex Mono", color="#7A9BB5", size=10),
+                    xaxis=dict(gridcolor="#1E2D3D", title="Strike Price"),
+                    yaxis=dict(gridcolor="#1E2D3D", title="Implied Volatility"),
+                    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+                    title=dict(
+                        text=f"Volatility Smile — {symbol} ({expiry_date})",
+                        font=dict(family="IBM Plex Mono", color="#E8F4FD", size=12),
+                    ),
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    height=380,
                 )
                 st.plotly_chart(fig_smile, use_container_width=True)
 
-                st.subheader("⚠️ Mispricing Alerts")
+                section_label("Mispricing Alerts")
                 st.dataframe(
                     liquid_calls[[
                         "strike", "lastPrice", "impliedVolatility",
                         "SABR_IV", "Mispricing", "Signal",
                     ]].style.applymap(
                         lambda x: (
-                            "color: red"   if "SELL" in str(x) else
-                            "color: green" if "BUY"  in str(x) else ""
+                            "color: #FF4466" if "SELL" in str(x) else
+                            "color: #00FF94" if "BUY"  in str(x) else ""
                         ),
                         subset=["Signal"],
                     ),
@@ -342,9 +354,9 @@ with tab_mispricing:
 # TAB 2 — Volatility Surface
 # ---------------------------------------------------------------------------
 with tab_surface:
-    st.subheader("3D Implied Volatility Surface")
+    section_label("3D Implied Volatility Surface")
     st.info(
-        "Visualising the volatility structure across Strikes and Time. "
+        "Visualising the volatility structure across strikes and time. "
         "(Mock data generated for visualisation — real surface requires fetching multiple expiries.)"
     )
 
@@ -355,15 +367,21 @@ with tab_surface:
     S_mesh, T_mesh = np.meshgrid(strikes_vis, times_vis)
     IV_mesh = 0.2 + 0.1 * ((S_mesh - spot_ref) / spot_ref) ** 2 + 0.05 * np.exp(-T_mesh)
 
-    fig_surf = go.Figure(data=[go.Surface(z=IV_mesh, x=strikes_vis, y=times_vis)])
+    fig_surf = go.Figure(data=[go.Surface(
+        z=IV_mesh, x=strikes_vis, y=times_vis,
+        colorscale=[[0, "#080C10"], [0.3, "#1E2D3D"], [0.6, "#00D4FF"], [1.0, "#00FF94"]],
+        showscale=True,
+    )])
     fig_surf.update_layout(
-        title="Implied Volatility Surface",
+        paper_bgcolor="#080C10",
+        font=dict(family="IBM Plex Mono", color="#7A9BB5", size=10),
         scene=dict(
-            xaxis_title="Strike",
-            yaxis_title="Time to Expiry (Years)",
-            zaxis_title="Implied Volatility",
+            xaxis=dict(title="Strike", gridcolor="#1E2D3D", backgroundcolor="#080C10"),
+            yaxis=dict(title="Time to Expiry (Yrs)", gridcolor="#1E2D3D", backgroundcolor="#080C10"),
+            zaxis=dict(title="Implied Vol", gridcolor="#1E2D3D", backgroundcolor="#080C10"),
+            bgcolor="#080C10",
         ),
+        margin=dict(l=0, r=0, t=20, b=0),
+        height=520,
     )
     st.plotly_chart(fig_surf, use_container_width=True)
-
-

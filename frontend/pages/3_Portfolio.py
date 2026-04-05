@@ -6,6 +6,10 @@ from datetime import datetime, timedelta
 import streamlit.components.v1 as components
 import uuid
 import time
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from components.style import inject_css
 
 try:
     import quant_reporter as qr
@@ -18,6 +22,7 @@ COLORS  = ["#00D4FF", "#00FF94", "#FFB800", "#FF4466", "#BF7FFF", "#FF8C00"]
 SPEED_MAP = {"Fast": 5000, "Medium": 20000, "Thorough": 50000}
 
 st.set_page_config(page_title="Portfolio — QuantVis", page_icon="▲", layout="wide")
+inject_css()
 
 st.markdown("""
 <div style="border-bottom:1px solid #1E2D3D;padding-bottom:1rem;margin-bottom:1.5rem;">
@@ -103,7 +108,7 @@ def _poll_rl(session_id, progress_bar, status_text, max_polls=400):
 with tab_optimizer:
 
     # ── How it works explanation ──────────────────────────────────────────────
-    with st.expander("ℹ️  HOW THIS ALLOCATOR WORKS", expanded=False):
+    with st.expander("HOW THIS ALLOCATOR WORKS", expanded=False):
         st.markdown("""
         <div style="font-family:'IBM Plex Sans',sans-serif;font-size:0.85rem;color:#7A9BB5;line-height:1.8;">
 
@@ -359,7 +364,7 @@ with tab_report:
     if not QUANT_REPORTER_AVAILABLE:
         st.error("`quant-reporter` not installed.")
     else:
-        with st.expander("📝  REPORT CONFIGURATION", expanded=True):
+        with st.expander("REPORT CONFIGURATION", expanded=True):
             col_in1, col_in2 = st.columns(2)
             with col_in1:
                 repo_tickers = st.text_input("Portfolio Tickers", "AAPL, MSFT, SPY, QQQ")
@@ -387,7 +392,7 @@ with tab_report:
                         with open(report_file, "r", encoding="utf-8") as f:
                             html_content = f.read()
                         st.success("Report generated.")
-                        st.download_button("📥  DOWNLOAD REPORT", html_content,
+                        st.download_button("DOWNLOAD REPORT", html_content,
                                            "Quant_Report.html", "text/html")
                         st.divider()
                         components.html(html_content, height=800, scrolling=True)

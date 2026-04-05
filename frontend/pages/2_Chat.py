@@ -1,28 +1,29 @@
 import streamlit as st
 import requests
+import os, sys
 
-# Configuration
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from components.style import inject_css, page_header
+
 API_URL = "http://127.0.0.1:8000/api"
 
-st.set_page_config(page_title="AI Chat - QuantVision", page_icon="💬")
+st.set_page_config(page_title="Advisor — QuantVis", page_icon="▲", layout="wide")
 
-st.title("AI Investment Advisor 💬")
+inject_css()
+page_header("AI Financial Research", "Investment Advisor", accent="#00FF94")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# User input
-if prompt := st.chat_input("Ask for investment advice..."):
+if prompt := st.chat_input("Ask about investment strategy, market analysis, or portfolio construction..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    # Backend call
     with st.chat_message("assistant"):
         with st.spinner("Thinking..."):
             try:
@@ -32,6 +33,6 @@ if prompt := st.chat_input("Ask for investment advice..."):
                     st.markdown(ai_response)
                     st.session_state.messages.append({"role": "assistant", "content": ai_response})
                 else:
-                    st.error("Failed to get response from AI.")
+                    st.error("Failed to reach the advisor.")
             except Exception as e:
-                st.error(f"Connection Error: {e}")
+                st.error(f"Connection error: {e}")
