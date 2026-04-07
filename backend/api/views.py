@@ -136,3 +136,35 @@ class BLOptimizationView(APIView):
             'bl_returns':   result['bl_returns'],
             'reasoning':    reasoning
         })
+
+
+class BlackLittermanAnalysisView(APIView):
+    """
+    Full Black-Litterman analysis with user-specified views.
+    Implements BL math from scratch with NumPy.
+    """
+    def post(self, request):
+        tickers = request.data.get('tickers', [])
+        market_weights = request.data.get('market_weights', {})
+        views = request.data.get('views', [])
+        tau = request.data.get('tau', 0.05)
+        risk_free_rate = request.data.get('risk_free_rate', 0.02)
+
+        if not tickers or len(tickers) < 2:
+            return Response(
+                {'error': 'At least 2 tickers required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        if not views:
+            return Response(
+                {'error': 'At least 1 view is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from .bl_numpy import run_bl_analysis
+        result = run_bl_analysis(tickers, market_weights, views, tau, risk_free_rate)
+
+        if result.get("error"):
+            return Response({'error': result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result)

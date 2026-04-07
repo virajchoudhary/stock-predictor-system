@@ -279,8 +279,9 @@ def _run_allocation(tickers, risk_tolerance):
             st.error(f"Optimization failed: {e}")
 
 # Tabs
-tab_allocator, tab_report = st.tabs([
+tab_allocator, tab_bl, tab_report = st.tabs([
     "Portfolio Allocator",
+    "Black-Litterman",
     "Deep Report (Backtest)"
 ])
 
@@ -369,6 +370,355 @@ with tab_allocator:
             if not still_optimizing:
                 st.session_state["has_optimizing"] = False
             st.rerun()
+
+# --- TAB 2: BLACK-LITTERMAN ---
+with tab_bl:
+    st.markdown("### Black-Litterman Model")
+    st.markdown(
+        "Specify your **market views** and confidence levels to compute "
+        "Black-Litterman posterior returns and optimal portfolio weights. "
+        "BL math is implemented from scratch with NumPy."
+    )
+
+    # --- Ticker input ---
+    bl_tickers_input = st.text_input(
+        "Tickers (comma separated)",
+        "AAPL, MSFT, GOOG, AMZN, TSLA, NVDA",
+        key="bl_tickers"
+    )
+    bl_tickers = [t.strip().upper() for t in bl_tickers_input.split(",") if t.strip()]
+
+    if len(bl_tickers) < 2:
+        st.warning("Enter at least 2 tickers.")
+    else:
+        # --- Market weights ---
+        st.markdown("#### Market Cap Weights")
+        st.caption(
+            "Auto-populated from yfinance market caps. "
+            "Toggle manual override to edit."
+        )
+
+        if "bl_mcap_fetched" not in st.session_state or \
+           st.session_state.get("bl_mcap_tickers") != bl_tickers:
+            # Fetch market caps
+            try:
+                import yfinance as yf_bl
+                caps = {}
+                for t in bl_tickers:
+                    try:
+                        info = yf_bl.Ticker(t).info
+                        cap = info.get("marketCap") or info.get("market_cap")
+                        if cap and cap > 0:
+                            caps[t] = float(cap)
+                    except Exception:
+                        pass
+                if not caps:
+                    caps = {t: 1.0 for t in bl_tickers}
+                avg = np.mean(list(caps.values()))
+                for t in bl_tickers:
+                    if t not in caps:
+                        caps[t] = avg
+                total = sum(caps.values())
+                st.session_state["bl_mcap_weights"] = {t: round(caps[t] / total, 4) for t in bl_tickers}
+            except Exception:
+                st.session_state["bl_mcap_weights"] = {t: round(1.0 / len(bl_tickers), 4) for t in bl_tickers}
+            st.session_state["bl_mcap_fetched"] = True
+            st.session_state["bl_mcap_tickers"] = bl_tickers
+
+        manual_override = st.checkbox("Manual override weights", key="bl_manual_weights")
+
+        mcap_weights = {}
+        if manual_override:
+            cols_w = st.columns(min(len(bl_tickers), 4))
+            for i, t in enumerate(bl_tickers):
+                with cols_w[i % min(len(bl_tickers), 4)]:
+                    default_w = st.session_state["bl_mcap_weights"].get(t, round(1.0 / len(bl_tickers), 4))
+                    mcap_weights[t] = st.number_input(
+                        t, min_value=0.0, max_value=1.0,
+                        value=default_w, step=0.01,
+                        key=f"bl_w_{t}"
+                    )
+            # Normalize
+            total_w = sum(mcap_weights.values())
+            if total_w > 0:
+                mcap_weights = {t: v / total_w for t, v in mcap_weights.items()}
+        else:
+            mcap_weights = st.session_state.get("bl_mcap_weights", {t: 1.0 / len(bl_tickers) for t in bl_tickers})
+            # Display as table
+            w_df = pd.DataFrame(
+                [(t, f"{w:.2%}") for t, w in mcap_weights.items()],
+                columns=["Ticker", "Market Weight"]
+            )
+            st.dataframe(w_df.set_index("Ticker"), use_container_width=True)
+
+        # --- View Builder ---
+        st.markdown("#### Views")
+        st.caption("Add your market views. Each view expresses a return expectation with a confidence level.")
+
+        if "bl_views" not in st.session_state:
+            st.session_state["bl_views"] = [
+                {"type": "absolute", "assets": [bl_tickers[0]], "return_pct": 10.0, "confidence_pct": 65},
+            ]
+
+        def _add_view():
+            st.session_state["bl_views"].append(
+                {"type": "absolute", "assets": [bl_tickers[0]], "return_pct": 5.0, "confidence_pct": 50}
+            )
+
+        def _remove_view(idx):
+            if len(st.session_state["bl_views"]) > 1:
+                st.session_state["bl_views"].pop(idx)
+
+        for vi, view in enumerate(st.session_state["bl_views"]):
+            with st.container():
+                c1, c2, c3, c4, c5 = st.columns([1.5, 2, 1.5, 2, 0.8])
+                with c1:
+                    vtype = st.selectbox(
+                        "Type", ["absolute", "relative"],
+                        index=0 if view["type"] == "absolute" else 1,
+                        key=f"bl_vtype_{vi}"
+                    )
+                    st.session_state["bl_views"][vi]["type"] = vtype
+                with c2:
+                    if vtype == "absolute":
+                        asset = st.selectbox(
+                            "Asset", bl_tickers,
+                            index=bl_tickers.index(view["assets"][0]) if view["assets"][0] in bl_tickers else 0,
+                            key=f"bl_vasset_{vi}"
+                        )
+                        st.session_state["bl_views"][vi]["assets"] = [asset]
+                    else:
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            a1 = st.selectbox(
+                                "Long", bl_tickers,
+                                index=0, key=f"bl_va1_{vi}"
+                            )
+                        with col_b:
+                            a2 = st.selectbox(
+                                "Short", bl_tickers,
+                                index=min(1, len(bl_tickers) - 1), key=f"bl_va2_{vi}"
+                            )
+                        st.session_state["bl_views"][vi]["assets"] = [a1, a2]
+                with c3:
+                    ret = st.number_input(
+                        "Return %", value=view["return_pct"],
+                        min_value=-100.0, max_value=500.0, step=0.5,
+                        key=f"bl_vret_{vi}"
+                    )
+                    st.session_state["bl_views"][vi]["return_pct"] = ret
+                with c4:
+                    conf = st.slider(
+                        "Confidence %", 1, 99, int(view["confidence_pct"]),
+                        key=f"bl_vconf_{vi}"
+                    )
+                    st.session_state["bl_views"][vi]["confidence_pct"] = conf
+                with c5:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    st.button("X", key=f"bl_vdel_{vi}", on_click=_remove_view, args=(vi,))
+
+        st.button("+ Add View", on_click=_add_view, key="bl_add_view")
+
+        # --- Parameters ---
+        st.markdown("#### Parameters")
+        pcol1, pcol2 = st.columns(2)
+        with pcol1:
+            bl_tau = st.slider("Tau (uncertainty scalar)", 0.01, 0.20, 0.05, 0.01, key="bl_tau")
+        with pcol2:
+            bl_rf = st.number_input("Risk-Free Rate", 0.0, 0.15, 0.02, 0.005, key="bl_rf")
+
+        # --- Run ---
+        if st.button("Run Black-Litterman Analysis", type="primary", key="bl_run"):
+            with st.spinner("Running Black-Litterman analysis..."):
+                try:
+                    payload = {
+                        "tickers": bl_tickers,
+                        "market_weights": mcap_weights,
+                        "views": st.session_state["bl_views"],
+                        "tau": bl_tau,
+                        "risk_free_rate": bl_rf,
+                    }
+                    resp = requests.post(
+                        f"{API_URL}/black-litterman/",
+                        json=payload,
+                        timeout=120
+                    )
+                    if resp.status_code == 200:
+                        st.session_state["bl_result"] = resp.json()
+                    else:
+                        err = resp.json().get("error", "Unknown error")
+                        st.error(f"Analysis failed: {err}")
+                        st.session_state["bl_result"] = None
+                except Exception as e:
+                    st.error(f"Request failed: {e}")
+                    st.session_state["bl_result"] = None
+
+        # --- Results ---
+        bl_res = st.session_state.get("bl_result")
+        if bl_res and not bl_res.get("error"):
+            st.divider()
+            st.markdown("### Results")
+            st.caption(
+                f"Delta (risk aversion): {bl_res['delta']} | "
+                f"Tau: {bl_res['tau']} | "
+                f"Risk-free rate: {bl_res['risk_free_rate']}"
+            )
+
+            # --- Side-by-side bar chart: Eq weights vs BL weights ---
+            st.subheader("Equilibrium vs BL Optimal Weights")
+            eq_w = bl_res["equilibrium_weights"]
+            bl_w = bl_res["bl_weights"]
+            tks = bl_res["tickers"]
+
+            fig_weights = go.Figure()
+            fig_weights.add_trace(go.Bar(
+                name="Equilibrium (Market)",
+                x=tks,
+                y=[eq_w.get(t, 0) for t in tks],
+                marker_color="#636EFA",
+            ))
+            fig_weights.add_trace(go.Bar(
+                name="BL Optimal",
+                x=tks,
+                y=[bl_w.get(t, 0) for t in tks],
+                marker_color="#00CC96",
+            ))
+            fig_weights.update_layout(
+                barmode="group",
+                yaxis_title="Weight",
+                xaxis_title="Ticker",
+                margin=dict(t=30, b=30),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            )
+            st.plotly_chart(fig_weights, use_container_width=True)
+
+            # --- Returns table ---
+            st.subheader("Return Comparison")
+            ret_table = bl_res["return_table"]
+            ret_df = pd.DataFrame(ret_table)
+            ret_df.columns = ["Ticker", "Pi (Eq Return %)", "BL Return %", "Difference %", "Optimal Weight"]
+            ret_df["Optimal Weight"] = ret_df["Optimal Weight"].apply(lambda x: f"{x:.2%}")
+
+            def _color_diff(val):
+                try:
+                    v = float(val)
+                    if v > 0:
+                        return "color: #4CAF50"
+                    elif v < 0:
+                        return "color: #f44336"
+                except (ValueError, TypeError):
+                    pass
+                return ""
+
+            st.dataframe(
+                ret_df.set_index("Ticker").style.applymap(
+                    _color_diff, subset=["Difference %"]
+                ),
+                use_container_width=True
+            )
+
+            # --- View decomposition chart ---
+            st.subheader("View Portfolio Decomposition")
+            view_decomp = bl_res.get("view_decomposition", [])
+            if view_decomp:
+                # Stacked bar: market portfolio + each view contribution
+                decomp_fig = go.Figure()
+
+                # Market portfolio base
+                decomp_fig.add_trace(go.Bar(
+                    name="Market Portfolio",
+                    x=tks,
+                    y=[eq_w.get(t, 0) for t in tks],
+                    marker_color="#636EFA",
+                ))
+
+                colors = ["#EF553B", "#00CC96", "#AB63FA", "#FFA15A", "#19D3F3", "#FF6692"]
+                for idx, vd in enumerate(view_decomp):
+                    lam = vd["lambda"]
+                    vw = vd["weights"]
+                    decomp_fig.add_trace(go.Bar(
+                        name=f"View {idx + 1} (λ={lam:.4f})",
+                        x=tks,
+                        y=[vw.get(t, 0) * lam for t in tks],
+                        marker_color=colors[idx % len(colors)],
+                    ))
+
+                decomp_fig.update_layout(
+                    barmode="stack",
+                    yaxis_title="Weight Contribution",
+                    xaxis_title="Ticker",
+                    margin=dict(t=30, b=30),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                )
+                st.plotly_chart(decomp_fig, use_container_width=True)
+
+            # --- Implied views (reverse BL) ---
+            st.subheader("Implied Views (Reverse Black-Litterman)")
+            impl_views = bl_res.get("implied_views", [])
+            if impl_views:
+                iv_rows = []
+                for iv in impl_views:
+                    assets_str = " vs ".join(iv["assets"]) if iv["type"] == "relative" else iv["assets"][0]
+                    iv_rows.append({
+                        "View": f"View {iv['view_index'] + 1}",
+                        "Type": iv["type"].title(),
+                        "Assets": assets_str,
+                        "Stated Return %": iv["stated_return_pct"],
+                        "Implied Return %": iv["implied_return_pct"],
+                    })
+                iv_df = pd.DataFrame(iv_rows)
+                st.dataframe(iv_df.set_index("View"), use_container_width=True)
+
+            # --- Omega confidence visualization ---
+            st.subheader("Omega Diagonal (View Uncertainty)")
+            omega_vals = bl_res.get("omega_diagonal", [])
+            if omega_vals:
+                view_labels = [f"View {i+1}" for i in range(len(omega_vals))]
+                fig_omega = go.Figure()
+                fig_omega.add_trace(go.Bar(
+                    x=view_labels,
+                    y=omega_vals,
+                    marker_color=["#FFA15A" if v > np.median(omega_vals) else "#00CC96" for v in omega_vals],
+                    text=[f"{v:.6f}" for v in omega_vals],
+                    textposition="outside",
+                ))
+                fig_omega.update_layout(
+                    yaxis_title="Omega (uncertainty)",
+                    xaxis_title="View",
+                    margin=dict(t=30, b=30),
+                )
+                st.plotly_chart(fig_omega, use_container_width=True)
+                st.caption("Lower omega = higher confidence in the view. Calibrated via Idzorek's method.")
+
+            # --- Portfolio stats ---
+            st.subheader("Portfolio Statistics")
+            pstats = bl_res["portfolio_stats"]
+            mstats = bl_res["market_stats"]
+            sc1, sc2, sc3 = st.columns(3)
+            with sc1:
+                st.metric(
+                    "Expected Return",
+                    f"{pstats['expected_return']:.2f}%",
+                    delta=f"{pstats['expected_return'] - mstats['expected_return']:+.2f}% vs market"
+                )
+            with sc2:
+                st.metric(
+                    "Volatility",
+                    f"{pstats['volatility']:.2f}%",
+                    delta=f"{pstats['volatility'] - mstats['volatility']:+.2f}% vs market",
+                    delta_color="inverse"
+                )
+            with sc3:
+                st.metric(
+                    "Sharpe Ratio",
+                    f"{pstats['sharpe_ratio']:.3f}",
+                    delta=f"{pstats['sharpe_ratio'] - mstats['sharpe_ratio']:+.3f} vs market"
+                )
+
+            st.caption(
+                f"Market baseline — Return: {mstats['expected_return']:.2f}%, "
+                f"Vol: {mstats['volatility']:.2f}%, Sharpe: {mstats['sharpe_ratio']:.3f}"
+            )
 
 # --- TAB 3: DEEP REPORT (Quant Reporter) ---
 with tab_report:

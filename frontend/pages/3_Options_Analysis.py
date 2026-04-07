@@ -201,8 +201,9 @@ def calibrate_sabr(strikes, market_ivs, f, t):
 # Layout
 # ---------------------------------------------------------------------------
 
-tab_mispricing, tab_surface = st.tabs([
+tab_mispricing, tab_bs, tab_surface = st.tabs([
     "Mispricing (SABR)",
+    "Black-Scholes",
     "Volatility Surface",
 ])
 
@@ -338,7 +339,210 @@ with tab_mispricing:
             )
 
 # ---------------------------------------------------------------------------
-# TAB 2 — Volatility Surface
+# TAB 2 — Black-Scholes
+# ---------------------------------------------------------------------------
+with tab_bs:
+    from scipy.stats import norm as sp_norm
+
+    def bs_price(S, K, T, r, sigma, option_type="call"):
+        """Black-Scholes option price."""
+        if T <= 0 or sigma <= 0:
+            intrinsic = max(S - K, 0) if option_type == "call" else max(K - S, 0)
+            return intrinsic
+        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        if option_type == "call":
+            return S * sp_norm.cdf(d1) - K * np.exp(-r * T) * sp_norm.cdf(d2)
+        else:
+            return K * np.exp(-r * T) * sp_norm.cdf(-d2) - S * sp_norm.cdf(-d1)
+
+    def bs_greeks(S, K, T, r, sigma, option_type="call"):
+        """Compute all Greeks."""
+        if T <= 0 or sigma <= 0:
+            return {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0}
+        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        pdf_d1 = sp_norm.pdf(d1)
+
+        gamma = pdf_d1 / (S * sigma * np.sqrt(T))
+        vega = S * pdf_d1 * np.sqrt(T) / 100  # per 1% move
+
+        if option_type == "call":
+            delta = sp_norm.cdf(d1)
+            theta = (-(S * pdf_d1 * sigma) / (2 * np.sqrt(T))
+                     - r * K * np.exp(-r * T) * sp_norm.cdf(d2)) / 365
+            rho = K * T * np.exp(-r * T) * sp_norm.cdf(d2) / 100
+        else:
+            delta = sp_norm.cdf(d1) - 1
+            theta = (-(S * pdf_d1 * sigma) / (2 * np.sqrt(T))
+                     + r * K * np.exp(-r * T) * sp_norm.cdf(-d2)) / 365
+            rho = -K * T * np.exp(-r * T) * sp_norm.cdf(-d2) / 100
+
+        return {"delta": delta, "gamma": gamma, "theta": theta, "vega": vega, "rho": rho}
+
+    def bs_implied_vol(market_price, S, K, T, r, option_type="call"):
+        """Newton's method for implied volatility."""
+        sigma = 0.2
+        for _ in range(100):
+            price = bs_price(S, K, T, r, sigma, option_type)
+            d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+            vega_raw = S * sp_norm.pdf(d1) * np.sqrt(T)
+            if vega_raw < 1e-10:
+                break
+            sigma = sigma - (price - market_price) / vega_raw
+            sigma = max(sigma, 0.001)
+        return sigma
+
+    st.subheader("Black-Scholes Option Pricer")
+
+    # Inputs
+    bs_col1, bs_col2 = st.columns(2)
+    with bs_col1:
+        bs_S = st.number_input("Spot Price (S)", 1.0, 100000.0, 100.0, 1.0, key="bs_S")
+        bs_K = st.number_input("Strike Price (K)", 1.0, 100000.0, 100.0, 1.0, key="bs_K")
+        bs_T = st.number_input("Time to Expiry (years)", 0.01, 10.0, 1.0, 0.01, key="bs_T")
+    with bs_col2:
+        bs_r = st.number_input("Risk-Free Rate", 0.0, 0.30, 0.05, 0.005, key="bs_r")
+        bs_sigma = st.number_input("Volatility (sigma)", 0.01, 3.0, 0.20, 0.01, key="bs_sigma")
+        bs_type = st.selectbox("Option Type", ["call", "put"], key="bs_type")
+
+    # Price and Greeks
+    price_call = bs_price(bs_S, bs_K, bs_T, bs_r, bs_sigma, "call")
+    price_put = bs_price(bs_S, bs_K, bs_T, bs_r, bs_sigma, "put")
+    greeks = bs_greeks(bs_S, bs_K, bs_T, bs_r, bs_sigma, bs_type)
+
+    st.divider()
+
+    # Metrics row
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    with mc1:
+        st.metric("Call Price", f"${price_call:.4f}")
+    with mc2:
+        st.metric("Put Price", f"${price_put:.4f}")
+    with mc3:
+        st.metric("Put-Call Parity Check",
+                   f"${price_call - price_put:.4f}",
+                   delta=f"S - K*e^(-rT) = ${bs_S - bs_K * np.exp(-bs_r * bs_T):.4f}")
+    with mc4:
+        st.metric("Intrinsic Value",
+                   f"${max(bs_S - bs_K, 0) if bs_type == 'call' else max(bs_K - bs_S, 0):.4f}")
+
+    # Greeks
+    st.subheader("Greeks")
+    gc1, gc2, gc3, gc4, gc5 = st.columns(5)
+    with gc1:
+        st.metric("Delta (Δ)", f"{greeks['delta']:.4f}")
+    with gc2:
+        st.metric("Gamma (Γ)", f"{greeks['gamma']:.6f}")
+    with gc3:
+        st.metric("Theta (Θ)", f"{greeks['theta']:.4f}")
+    with gc4:
+        st.metric("Vega (ν)", f"{greeks['vega']:.4f}")
+    with gc5:
+        st.metric("Rho (ρ)", f"{greeks['rho']:.4f}")
+
+    st.divider()
+
+    # --- Charts ---
+    st.subheader("Payoff & Sensitivity Charts")
+    chart_tab1, chart_tab2, chart_tab3 = st.tabs(["Payoff Diagram", "Greeks vs Spot", "Price Heatmap"])
+
+    with chart_tab1:
+        spot_range = np.linspace(bs_K * 0.5, bs_K * 1.5, 200)
+        payoff_call = np.maximum(spot_range - bs_K, 0) - price_call
+        payoff_put = np.maximum(bs_K - spot_range, 0) - price_put
+        price_curve = np.array([
+            bs_price(s, bs_K, bs_T, bs_r, bs_sigma, bs_type) for s in spot_range
+        ])
+        intrinsic = np.maximum(spot_range - bs_K, 0) if bs_type == "call" else np.maximum(bs_K - spot_range, 0)
+
+        fig_payoff = go.Figure()
+        fig_payoff.add_trace(go.Scatter(
+            x=spot_range, y=price_curve,
+            mode="lines", name=f"BS {bs_type.title()} Price",
+            line=dict(color="#00CC96", width=2),
+        ))
+        fig_payoff.add_trace(go.Scatter(
+            x=spot_range, y=intrinsic,
+            mode="lines", name="Intrinsic Value",
+            line=dict(color="#636EFA", dash="dash"),
+        ))
+        fig_payoff.add_trace(go.Scatter(
+            x=spot_range,
+            y=payoff_call if bs_type == "call" else payoff_put,
+            mode="lines", name="P&L at Expiry",
+            line=dict(color="#EF553B", width=1.5),
+        ))
+        fig_payoff.add_hline(y=0, line_dash="dot", line_color="gray")
+        fig_payoff.add_vline(x=bs_K, line_dash="dot", line_color="gray",
+                             annotation_text="Strike")
+        fig_payoff.update_layout(
+            xaxis_title="Spot Price",
+            yaxis_title="Value ($)",
+            margin=dict(t=20, b=30),
+        )
+        st.plotly_chart(fig_payoff, use_container_width=True)
+
+    with chart_tab2:
+        spot_g = np.linspace(bs_K * 0.5, bs_K * 1.5, 200)
+        deltas = [bs_greeks(s, bs_K, bs_T, bs_r, bs_sigma, bs_type)["delta"] for s in spot_g]
+        gammas = [bs_greeks(s, bs_K, bs_T, bs_r, bs_sigma, bs_type)["gamma"] for s in spot_g]
+        thetas = [bs_greeks(s, bs_K, bs_T, bs_r, bs_sigma, bs_type)["theta"] for s in spot_g]
+        vegas = [bs_greeks(s, bs_K, bs_T, bs_r, bs_sigma, bs_type)["vega"] for s in spot_g]
+
+        from plotly.subplots import make_subplots
+        fig_greeks = make_subplots(rows=2, cols=2,
+                                   subplot_titles=["Delta", "Gamma", "Theta", "Vega"])
+        fig_greeks.add_trace(go.Scatter(x=spot_g, y=deltas, line=dict(color="#636EFA")), row=1, col=1)
+        fig_greeks.add_trace(go.Scatter(x=spot_g, y=gammas, line=dict(color="#00CC96")), row=1, col=2)
+        fig_greeks.add_trace(go.Scatter(x=spot_g, y=thetas, line=dict(color="#EF553B")), row=2, col=1)
+        fig_greeks.add_trace(go.Scatter(x=spot_g, y=vegas, line=dict(color="#AB63FA")), row=2, col=2)
+        fig_greeks.update_layout(
+            showlegend=False,
+            margin=dict(t=40, b=30),
+            height=500,
+        )
+        for i in range(1, 5):
+            fig_greeks.update_xaxes(title_text="Spot Price", row=(i-1)//2+1, col=(i-1)%2+1)
+        st.plotly_chart(fig_greeks, use_container_width=True)
+
+    with chart_tab3:
+        st.caption("Option price as a function of Spot Price and Volatility.")
+        spot_hm = np.linspace(bs_K * 0.7, bs_K * 1.3, 30)
+        vol_hm = np.linspace(0.05, 0.80, 25)
+        price_grid = np.array([
+            [bs_price(s, bs_K, bs_T, bs_r, v, bs_type) for s in spot_hm]
+            for v in vol_hm
+        ])
+        fig_hm = go.Figure(data=go.Heatmap(
+            z=price_grid,
+            x=np.round(spot_hm, 1),
+            y=np.round(vol_hm, 2),
+            colorscale="Viridis",
+            colorbar_title="Price ($)",
+        ))
+        fig_hm.update_layout(
+            xaxis_title="Spot Price",
+            yaxis_title="Volatility",
+            margin=dict(t=20, b=30),
+        )
+        st.plotly_chart(fig_hm, use_container_width=True)
+
+    # --- Implied Volatility Calculator ---
+    st.divider()
+    st.subheader("Implied Volatility Calculator")
+    iv_col1, iv_col2 = st.columns([2, 1])
+    with iv_col1:
+        bs_market_price = st.number_input(
+            "Market Option Price", 0.01, 100000.0, 10.0, 0.01, key="bs_mkt_price"
+        )
+    with iv_col2:
+        if st.button("Calculate IV", key="bs_calc_iv"):
+            iv = bs_implied_vol(bs_market_price, bs_S, bs_K, bs_T, bs_r, bs_type)
+            st.metric("Implied Volatility", f"{iv:.4f} ({iv*100:.2f}%)")
+
+# ---------------------------------------------------------------------------
+# TAB 3 — Volatility Surface
 # ---------------------------------------------------------------------------
 with tab_surface:
     st.subheader("3D Implied Volatility Surface")
