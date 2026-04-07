@@ -3,7 +3,6 @@ from rest_framework.response import Response
 from rest_framework import status
 from .ai_services import GroqService, TrendPredictor, PortfolioOptimizer
 from django.http import StreamingHttpResponse
-from .evolution import evolutionary_hpo_generator
 
 class ChatView(APIView):
     def post(self, request):
@@ -139,75 +138,33 @@ class BLOptimizationView(APIView):
         })
 
 
-class EvolutionHPOView(APIView):
-    def get(self, request):
-        symbol = request.query_params.get('symbol', 'AAPL')
-        pop_size = int(request.query_params.get('pop_size', 5))
-        generations = int(request.query_params.get('generations', 5))
-        mutation_rate = float(request.query_params.get('mutation_rate', 0.2))
-
-        generator = evolutionary_hpo_generator(
-            symbol=symbol,
-            pop_size=pop_size,
-            generations=generations,
-            mutation_rate=mutation_rate
-        )
-        return StreamingHttpResponse(generator, content_type='text/event-stream')
-
-
-class BlackScholesView(APIView):
-    """POST /api/black-scholes/ — full Black-Scholes analysis."""
+class BlackLittermanAnalysisView(APIView):
+    """
+    Full Black-Litterman analysis with user-specified views.
+    Implements BL math from scratch with NumPy.
+    """
     def post(self, request):
-        from .black_scholes import analyze_option
+        tickers = request.data.get('tickers', [])
+        market_weights = request.data.get('market_weights', {})
+        views = request.data.get('views', [])
+        tau = request.data.get('tau', 0.05)
+        risk_free_rate = request.data.get('risk_free_rate', 0.02)
 
-        required = ['S', 'K', 'T', 'r', 'sigma']
-        missing = [f for f in required if f not in request.data]
-        if missing:
+        if not tickers or len(tickers) < 2:
             return Response(
-                {'error': f'Missing required fields: {", ".join(missing)}'},
-                status=status.HTTP_400_BAD_REQUEST,
+                {'error': 'At least 2 tickers required.'},
+                status=status.HTTP_400_BAD_REQUEST
             )
-
-        try:
-            result = analyze_option(
-                S=float(request.data['S']),
-                K=float(request.data['K']),
-                T=float(request.data['T']),
-                r=float(request.data['r']),
-                sigma=float(request.data['sigma']),
-                q=float(request.data.get('q', 0.0)),
-                market_price=float(request.data['market_price'])
-                    if request.data.get('market_price') else None,
-                option_type=request.data.get('option_type', 'call'),
-                signal_threshold=float(request.data.get('signal_threshold', 5.0)),
-            )
-            return Response(result)
-        except ValueError as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        except Exception as e:
+        if not views:
             return Response(
-                {'error': f'Computation failed: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                {'error': 'At least 1 view is required.'},
+                status=status.HTTP_400_BAD_REQUEST
             )
 
+        from .bl_numpy import run_bl_analysis
+        result = run_bl_analysis(tickers, market_weights, views, tau, risk_free_rate)
 
-class SWOTView(APIView):
-    """POST /api/swot/ — full SWOT analysis pipeline."""
-    def post(self, request):
-        from .swot_service import run_swot_analysis
-        query = request.data.get('query', '').strip()
-        if not query:
-            return Response(
-                {'error': 'Company name or ticker is required'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            result = run_swot_analysis(query)
-            if 'error' in result and len(result) <= 2:
-                return Response(result, status=status.HTTP_404_NOT_FOUND)
-            return Response(result)
-        except Exception as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        if result.get("error"):
+            return Response({'error': result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result)
