@@ -1,8 +1,24 @@
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from .ai_services import GroqService, TrendPredictor, PortfolioOptimizer
 from django.http import StreamingHttpResponse
+
+
+def _timed_call(func, timeout_seconds, fallback):
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FutureTimeoutError:
+        future.cancel()
+        return fallback
+    except Exception:
+        return fallback
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
 
 class ChatView(APIView):
     def post(self, request):
@@ -48,19 +64,22 @@ class PortfolioOptimizationView(APIView):
             
         # Auto-queue GA for any ticker without an evolved model
         try:
-            from .tasks import run_ga_for_ticker
+            from .tasks import queue_ga_for_ticker
             from .models import OptimizedHyperparams
             for ticker in tickers:
                 if not OptimizedHyperparams.get_valid_cache(ticker):
-                    run_ga_for_ticker.delay(ticker)
+                    queue_ga_for_ticker(ticker)
         except Exception:
             pass  # never block the optimization request
 
         allocation = PortfolioOptimizer.optimize(tickers, risk_tolerance)
-        
-        # New: Get AI Commentary
-        reasoning = GroqService.analyze_allocation(tickers, allocation, risk_tolerance)
-        
+
+        reasoning = _timed_call(
+            lambda: GroqService.analyze_allocation(tickers, allocation, risk_tolerance),
+            timeout_seconds=2.5,
+            fallback="",
+        )
+
         return Response({
             'allocation': allocation,
             'reasoning': reasoning
@@ -128,7 +147,11 @@ class BLOptimizationView(APIView):
         portfolio stance is (bullish/defensive/balanced).
         """
 
-        reasoning = GroqService.chat(prompt)
+        reasoning = _timed_call(
+            lambda: GroqService.chat(prompt),
+            timeout_seconds=3.0,
+            fallback="",
+        )
 
         return Response({
             'allocation':   result['allocation'],
@@ -165,6 +188,21 @@ class BlackLittermanAnalysisView(APIView):
         result = run_bl_analysis(tickers, market_weights, views, tau, risk_free_rate)
 
         if result.get("error"):
+            return Response({'error': result["error"]}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result)
+
+
+class SWOTAnalysisView(APIView):
+    def post(self, request):
+        query = request.data.get('query', '')
+        if not query:
+            return Response({'error': 'Query is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .swot_service import run_swot_analysis
+        result = run_swot_analysis(query)
+
+        if isinstance(result, dict) and result.get("error"):
             return Response({'error': result["error"]}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(result)

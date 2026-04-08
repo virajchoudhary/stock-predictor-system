@@ -1,7 +1,11 @@
 from celery import shared_task
+from django.conf import settings
 from .evolution import evaluate_chromosome
 from .models import OptimizedHyperparams, SearchedTicker
+from urllib.parse import urlparse
 import random
+import socket
+import time
 import numpy as np
 
 # default watchlist — always optimized regardless of user searches
@@ -9,6 +13,9 @@ SEED_WATCHLIST = [
     "AAPL", "TSLA", "SPY", "MSFT", "GOOGL", "GOOG",
     "NIFTYBEES.NS", "RELIANCE.NS", "NVDA", "AMZN", "META", "QQQ"
 ]
+
+_BROKER_STATUS_CACHE = {"checked_at": 0.0, "available": False}
+_BROKER_STATUS_TTL_SECONDS = 15.0
 
 
 @shared_task(bind=True, max_retries=2)
@@ -106,6 +113,55 @@ def run_ga_for_ticker(self, symbol, pop_size=20, generations=15, mutation_rate=0
         raise self.retry(exc=exc, countdown=300)
 
 
+def celery_broker_available(timeout_seconds=0.25):
+    """
+    Fast connectivity check so UI/API requests do not block when Redis/Celery
+    is not running locally.
+    """
+    now = time.monotonic()
+    if now - _BROKER_STATUS_CACHE["checked_at"] < _BROKER_STATUS_TTL_SECONDS:
+        return _BROKER_STATUS_CACHE["available"]
+
+    available = False
+    broker_url = getattr(settings, "CELERY_BROKER_URL", "")
+    parsed = urlparse(broker_url)
+    host = parsed.hostname
+    port = parsed.port or 6379
+
+    if host:
+        try:
+            with socket.create_connection((host, port), timeout=timeout_seconds):
+                available = True
+        except OSError:
+            available = False
+
+    _BROKER_STATUS_CACHE["checked_at"] = now
+    _BROKER_STATUS_CACHE["available"] = available
+    return available
+
+
+def queue_ga_for_ticker(symbol, pop_size=20, generations=15, mutation_rate=0.4):
+    """
+    Submit the GA job only when the Celery broker is reachable.
+    Returns True if the task was queued, otherwise False.
+    """
+    if not celery_broker_available():
+        return False
+
+    try:
+        run_ga_for_ticker.delay(
+            symbol,
+            pop_size=pop_size,
+            generations=generations,
+            mutation_rate=mutation_rate,
+        )
+        return True
+    except Exception:
+        _BROKER_STATUS_CACHE["checked_at"] = time.monotonic()
+        _BROKER_STATUS_CACHE["available"] = False
+        return False
+
+
 @shared_task
 def run_hpo_for_watchlist():
     """
@@ -115,4 +171,4 @@ def run_hpo_for_watchlist():
     from .models import SearchedTicker
     watchlist = list(set(SEED_WATCHLIST + SearchedTicker.get_watchlist()))
     for symbol in watchlist:
-        run_ga_for_ticker.delay(symbol)
+        queue_ga_for_ticker(symbol)

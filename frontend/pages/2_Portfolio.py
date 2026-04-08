@@ -6,6 +6,8 @@ import numpy as np
 import time
 import threading
 import os
+import html
+from io import StringIO
 from datetime import datetime, timedelta
 import streamlit.components.v1 as components
 
@@ -13,6 +15,15 @@ import streamlit.components.v1 as components
 try:
     import quant_reporter as qr
     import yfinance as yf
+
+    try:
+        _YF_CACHE_DIR = os.path.normpath(
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".cache", "yfinance")
+        )
+        os.makedirs(_YF_CACHE_DIR, exist_ok=True)
+        yf.set_tz_cache_location(_YF_CACHE_DIR)
+    except Exception:
+        pass
 
     # --- MONKEY PATCH FOR quant_reporter TO HANDLE yfinance>=0.2.40 SERIES OBJECTS ---
     if hasattr(qr, 'opt_core'):
@@ -57,8 +68,23 @@ try:
             pass
     # ---------------------------------------------------------------------------------
 
+    # Monkey-patch html_builder to avoid emoji print crash on Windows cp1252
+    import quant_reporter.html_builder as _qr_hb
+    _orig_generate = _qr_hb.generate_html_report
+
+    def _safe_generate_html_report(sections, title="Quantitative Report", filename="report.html"):
+        import io, sys
+        _old_stdout = sys.stdout
+        sys.stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+        try:
+            _orig_generate(sections, title=title, filename=filename)
+        finally:
+            sys.stdout = _old_stdout
+
+    _qr_hb.generate_html_report = _safe_generate_html_report
+
     QUANT_REPORTER_AVAILABLE = True
-except ImportError:
+except Exception:
     QUANT_REPORTER_AVAILABLE = False
 
 # Configuration
@@ -86,6 +112,584 @@ def _render_allocation_charts(allocation):
         df["Weight"] = df["Weight"].apply(lambda x: f"{x:.1%}")
         st.table(df.set_index("Ticker"))
 
+
+def _render_allocation_bar_table(allocation):
+    if not allocation:
+        st.warning("No allocation data.")
+        return
+
+    df = pd.DataFrame(list(allocation.items()), columns=["Ticker", "Weight"])
+    df = df.sort_values("Weight", ascending=False)
+
+    col_chart, col_table = st.columns([2, 1])
+    with col_chart:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=df["Ticker"],
+            y=df["Weight"],
+            marker_color="#00CC96",
+            text=[f"{v:.2%}" for v in df["Weight"]],
+            textposition="outside",
+        ))
+        fig.update_layout(
+            xaxis_title="Ticker",
+            yaxis_title="Weight",
+            margin=dict(t=20, b=20),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_table:
+        table_df = df.copy()
+        table_df["Weight"] = table_df["Weight"].map(lambda x: f"{x:.2%}")
+        st.dataframe(table_df.set_index("Ticker"), use_container_width=True)
+
+
+def _build_allocation_bar_figure(allocation, title="Risk-Based Allocation"):
+    df = pd.DataFrame(list(allocation.items()), columns=["Ticker", "Weight"])
+    df = df.sort_values("Weight", ascending=False)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=df["Ticker"],
+        y=df["Weight"],
+        marker_color="#00CC96",
+        text=[f"{v:.2%}" for v in df["Weight"]],
+        textposition="outside",
+        hovertemplate="Ticker=%{x}<br>Weight=%{y:.2%}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=title,
+        xaxis_title="Ticker",
+        yaxis_title="Portfolio Weight",
+        margin=dict(t=50, b=30),
+        showlegend=False,
+    )
+    return fig
+
+
+def _allocation_table_html(allocation, weight_column="Weight"):
+    table_df = pd.DataFrame(list(allocation.items()), columns=["Ticker", weight_column])
+    table_df = table_df.sort_values(weight_column, ascending=False)
+    table_df[weight_column] = table_df[weight_column].map(lambda x: f"{x:.2%}")
+    return table_df.to_html(index=False, classes="metrics-table")
+
+
+def _history_payload_to_frame(payload):
+    if not payload:
+        return pd.DataFrame()
+
+    dates = payload.get("dates", [])
+    series = payload.get("series", {})
+    if not dates or not series:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame(series, index=pd.to_datetime(dates))
+    frame.index.name = "Date"
+    return frame.sort_index()
+
+
+def _normalize_weight_vector(weight_dict, tickers):
+    weights = pd.Series(weight_dict, dtype=float).reindex(tickers).fillna(0.0)
+    total = float(weights.sum())
+    if total <= 1e-10:
+        return pd.Series({t: 1.0 / len(tickers) for t in tickers})
+    return weights / total
+
+
+def _portfolio_growth(price_frame, weight_dict):
+    if price_frame.empty:
+        return pd.Series(dtype=float)
+
+    tickers = list(price_frame.columns)
+    weights = _normalize_weight_vector(weight_dict, tickers)
+    normalized = price_frame / price_frame.iloc[0]
+    growth = normalized.mul(weights, axis=1).sum(axis=1)
+    growth.name = "Growth"
+    return growth
+
+
+def _performance_metrics(growth_series):
+    if growth_series.empty or len(growth_series) < 2:
+        return None
+
+    total_return = float(growth_series.iloc[-1] / growth_series.iloc[0] - 1.0)
+    daily_returns = growth_series.pct_change().dropna()
+    if daily_returns.empty:
+        return None
+
+    annualized_return = float((1.0 + total_return) ** (252.0 / len(daily_returns)) - 1.0)
+    running_peak = growth_series.cummax()
+    max_drawdown = float(((growth_series - running_peak) / running_peak).min())
+    pnl_pct = total_return * 100.0
+
+    return {
+        "total_return": total_return,
+        "annualized_return": annualized_return,
+        "max_drawdown": max_drawdown,
+        "pnl_pct": pnl_pct,
+    }
+
+
+def _figure_has_data(fig):
+    if fig is None or not getattr(fig, "data", None):
+        return False
+
+    for trace in fig.data:
+        for attr in ("x", "y", "z", "values"):
+            values = getattr(trace, attr, None)
+            if values is not None and len(values) > 0:
+                return True
+    return False
+
+
+def _empty_report_figure(title, message):
+    fig = go.Figure()
+    fig.add_annotation(
+        text=message,
+        x=0.5,
+        y=0.5,
+        xref="paper",
+        yref="paper",
+        showarrow=False,
+        font=dict(size=16, color="#FAFAFA"),
+    )
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False)
+    fig.update_layout(
+        title=title,
+        height=420,
+        margin=dict(t=60, b=30, l=30, r=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#FAFAFA"),
+    )
+    return fig
+
+
+def _style_report_figure(fig, fallback_title, xaxis_title=None, yaxis_title=None, height=430):
+    if fig is None:
+        return None
+
+    title_obj = fig.layout.title.text if getattr(fig.layout, "title", None) else None
+    fig.update_layout(
+        title=title_obj or fallback_title,
+        height=height,
+        margin=dict(t=60, b=30, l=30, r=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#FAFAFA"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+
+    has_cartesian_axes = any(getattr(trace, "type", None) not in {"pie"} for trace in fig.data)
+    if has_cartesian_axes:
+        if xaxis_title:
+            fig.update_xaxes(title_text=xaxis_title)
+        elif not fig.layout.xaxis.title.text:
+            fig.update_xaxes(title_text="Date")
+
+        if yaxis_title:
+            fig.update_yaxes(title_text=yaxis_title)
+
+    return fig
+
+
+def _prepare_report_figure(fig, title, xaxis_title=None, yaxis_title=None, height=430):
+    if fig is None or not _figure_has_data(fig):
+        return _empty_report_figure(title, f"{title} is not available for the current data selection.")
+    return _style_report_figure(
+        fig,
+        fallback_title=title,
+        xaxis_title=xaxis_title,
+        yaxis_title=yaxis_title,
+        height=height,
+    )
+
+
+def _validate_benchmark_ticker(benchmark_ticker, start_date, end_date):
+    ticker = benchmark_ticker.strip().upper()
+    if not ticker:
+        return None, "Benchmark ticker is required."
+
+    try:
+        history = yf.download(
+            ticker,
+            start=pd.to_datetime(start_date).strftime("%Y-%m-%d"),
+            end=(pd.to_datetime(end_date) + timedelta(days=1)).strftime("%Y-%m-%d"),
+            progress=False,
+            threads=False,
+        )
+        if history is None or history.empty:
+            return None, f"`{ticker}` did not return benchmark price history for the selected dates."
+    except Exception as exc:
+        return None, f"Could not validate benchmark ticker `{ticker}`: {exc}"
+
+    return ticker, None
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _fetch_sector_map(tickers):
+    sector_map = {}
+    for ticker in tickers:
+        sector = "Other"
+        try:
+            info = yf.Ticker(ticker).info if QUANT_REPORTER_AVAILABLE else {}
+            sector = (
+                info.get("sector")
+                or info.get("industry")
+                or info.get("quoteType")
+                or "Other"
+            )
+        except Exception:
+            sector = "Other"
+        sector_map[ticker] = str(sector)
+    return sector_map
+
+
+def _fetch_report_allocation(tickers, risk_tolerance):
+    try:
+        response = requests.post(
+            f"{API_URL}/optimize/",
+            json={"tickers": tickers, "risk_tolerance": risk_tolerance},
+            timeout=20,
+        )
+        if response.status_code != 200:
+            return None, f"Allocation request returned {response.status_code}"
+        data = response.json()
+        return data.get("allocation", {}), None
+    except requests.Timeout:
+        return None, "The allocation service timed out before it returned a risk-based portfolio."
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _format_duration(seconds):
+    total_seconds = max(int(round(seconds)), 0)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _render_deep_report_progress(
+    placeholder,
+    progress_value,
+    stage_label,
+    detail,
+    start_time,
+    eta_seconds=None,
+):
+    progress_value = max(0.0, min(float(progress_value), 1.0))
+    progress_percent = int(round(progress_value * 100))
+    timer_id = f"deep-report-elapsed-{int(start_time * 1000)}"
+    stage_label_safe = html.escape(stage_label)
+    detail_safe = html.escape(detail)
+    remaining_label = (
+        _format_duration(eta_seconds)
+        if eta_seconds is not None
+        else "Calculating..."
+    )
+
+    with placeholder.container():
+        st.progress(progress_percent)
+        st.caption(f"{stage_label} ({progress_percent}%)")
+        components.html(
+            f"""
+            <div style="border:1px solid #1f2937;border-radius:12px;padding:14px 16px;background:#0f172a;color:#e2e8f0;font-family:Inter,Segoe UI,Arial,sans-serif;">
+              <div style="display:flex;gap:16px;justify-content:space-between;flex-wrap:wrap;">
+                <div style="min-width:160px;">
+                  <div style="font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Stage</div>
+                  <div style="font-size:16px;font-weight:600;margin-top:4px;">{stage_label_safe}</div>
+                </div>
+                <div style="min-width:120px;">
+                  <div style="font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Elapsed</div>
+                  <div id="{timer_id}" style="font-size:16px;font-weight:600;margin-top:4px;">0s</div>
+                </div>
+                <div style="min-width:180px;">
+                  <div style="font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Estimated Remaining</div>
+                  <div style="font-size:16px;font-weight:600;margin-top:4px;">{remaining_label}</div>
+                </div>
+              </div>
+              <div style="font-size:13px;color:#cbd5e1;margin-top:12px;">{detail_safe}</div>
+            </div>
+            <script>
+            (function() {{
+              const startTime = {int(start_time * 1000)};
+              const timer = document.getElementById("{timer_id}");
+              function formatDuration(totalSeconds) {{
+                const hours = Math.floor(totalSeconds / 3600);
+                const minutes = Math.floor((totalSeconds % 3600) / 60);
+                const seconds = totalSeconds % 60;
+                if (hours > 0) {{
+                  return `${{hours}}h ${{minutes}}m ${{seconds}}s`;
+                }}
+                if (minutes > 0) {{
+                  return `${{minutes}}m ${{seconds}}s`;
+                }}
+                return `${{seconds}}s`;
+              }}
+              function updateTimer() {{
+                if (!timer) return;
+                const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
+                timer.textContent = formatDuration(elapsedSeconds);
+              }}
+              updateTimer();
+              window.setInterval(updateTimer, 1000);
+            }})();
+            </script>
+            """,
+            height=118,
+        )
+        st.caption("Progress is stage-based. Runtime usually depends on ticker count and date range.")
+
+
+def _build_deep_report_context(
+    portfolio_dict,
+    benchmark_ticker,
+    train_start,
+    train_end,
+    report_file,
+    sector_map,
+    risk_tolerance,
+    progress_callback=None,
+):
+    from quant_reporter.data import get_data
+    from quant_reporter.metrics import calculate_metrics
+    from quant_reporter.html_builder import generate_html_report
+    from quant_reporter.plotting import plot_cumulative_returns, plot_regression
+    from quant_reporter.opt_core import calculate_rolling_returns, get_portfolio_price
+    import quant_reporter.combined_report as qr_combined
+
+    def _emit_progress(progress_value, stage_label, detail, eta_seconds=None):
+        if progress_callback:
+            progress_callback(progress_value, stage_label, detail, eta_seconds)
+
+    test_start_dt = pd.to_datetime(train_end) + timedelta(days=1)
+    test_end_dt = datetime.now() - timedelta(days=1)
+    if test_start_dt >= test_end_dt:
+        raise ValueError("Training end date must leave at least one day for the test period.")
+
+    train_start_str = pd.to_datetime(train_start).strftime("%Y-%m-%d")
+    train_end_str = pd.to_datetime(train_end).strftime("%Y-%m-%d")
+    test_start_str = test_start_dt.strftime("%Y-%m-%d")
+    test_end_str = test_end_dt.strftime("%Y-%m-%d")
+    full_end_str = test_end_str
+
+    _emit_progress(0.28, "Preparing report inputs", "Loading report settings and risk-free rate.", 55)
+    risk_free_rate = qr.opt_core.get_risk_free_rate()
+    tickers = list(portfolio_dict.keys())
+    all_tickers = list(dict.fromkeys(tickers + [benchmark_ticker]))
+
+    _emit_progress(0.38, "Fetching full-period data", f"Downloading price history through {full_end_str}.", 45)
+    data_full = get_data(all_tickers, train_start_str, full_end_str)
+    _emit_progress(0.48, "Fetching training data", f"Loading in-sample data through {train_end_str}.", 34)
+    data_train = get_data(all_tickers, train_start_str, train_end_str)
+    _emit_progress(0.58, "Fetching validation data", f"Loading out-of-sample data through {test_end_str}.", 26)
+    data_test = get_data(all_tickers, test_start_str, test_end_str)
+    if data_full is None or data_train is None or data_test is None:
+        raise ValueError("Failed to fetch report data for one or more periods.")
+
+    _emit_progress(0.68, "Calculating portfolio metrics", "Building cumulative returns, regression, and rolling metrics.", 19)
+    portfolio_eval = (data_full[[benchmark_ticker]] / data_full[[benchmark_ticker]].iloc[0]).copy()
+    portfolio_eval["My Portfolio"] = get_portfolio_price(data_full[tickers], portfolio_dict)
+    pr_metrics, pr_plot_data = calculate_metrics(
+        portfolio_eval, "My Portfolio", benchmark_ticker, risk_free_rate
+    )
+    pr_rolling_html = calculate_rolling_returns(portfolio_eval).to_html(classes="metrics-table")
+    pr_plots = {
+        "cumulative": plot_cumulative_returns(pr_plot_data, "My Portfolio", benchmark_ticker),
+        "regression": plot_regression(pr_plot_data, pr_metrics, "My Portfolio", benchmark_ticker),
+    }
+
+    _emit_progress(0.82, "Running backtests and simulations", "Executing optimization validation and Monte Carlo analysis.", 10)
+    validation = qr_combined._run_validation_logic(
+        data_train,
+        data_test,
+        tickers,
+        tickers,
+        benchmark_ticker,
+        portfolio_dict,
+        risk_free_rate,
+        sector_map,
+        None,
+        None,
+        sector_map,
+    )
+
+    allocation_section = {
+        "title": "Portfolio Construction",
+        "description": (
+            f"Risk-based allocation generated at risk tolerance {risk_tolerance:.2f} "
+            f"using benchmark {benchmark_ticker}."
+        ),
+        "sidebar": [
+            {
+                "title": "Allocation Inputs",
+                "type": "metrics",
+                "data": {
+                    "Risk Tolerance": f"{risk_tolerance:.2f}",
+                    "Allocation Method": "Continuous blend: inverse vol -> min vol -> max Sharpe",
+                    "Benchmark": benchmark_ticker,
+                },
+            },
+        ],
+        "main_content": [
+            {
+                "title": "Risk-Based Allocation Bar Chart",
+                "type": "plot",
+                "data": _build_allocation_bar_figure(portfolio_dict, "Risk-Based Allocation"),
+            },
+            {
+                "title": "Risk-Based Allocation Table",
+                "type": "table_html",
+                "data": _allocation_table_html(portfolio_dict, "Weight"),
+            },
+        ],
+    }
+
+    sections = [
+        allocation_section,
+        {
+            "title": "User Portfolio",
+            "description": f"Full-period analysis from {train_start_str} to {full_end_str}.",
+            "sidebar": [
+                {"title": "User Portfolio Metrics", "type": "metrics", "data": pr_metrics},
+                {"title": "User Portfolio Rolling Returns", "type": "table_html", "data": pr_rolling_html},
+            ],
+            "main_content": [
+                {"title": "Portfolio Cumulative Returns", "type": "plot", "data": pr_plots["cumulative"]},
+                {"title": "Portfolio Alpha/Beta Regression", "type": "plot", "data": pr_plots["regression"]},
+            ],
+        },
+        {
+            "title": "Optimization Analysis",
+            "description": f"Training-period optimization from {train_start_str} to {train_end_str}.",
+            "sidebar": [
+                {"title": "Asset-Benchmark Correlation", "type": "table_html", "data": validation["asset_corr_html"]},
+            ],
+            "main_content": [
+                {"title": "Strategy Compositions (Asset)", "type": "plot", "data": validation["optimization_plots"]["pie_plot"]},
+                {"title": "Strategy Compositions (Sector)", "type": "plot", "data": validation["optimization_plots"]["sector_pie_plot"]},
+                {"title": "Risk Contribution (Asset)", "type": "plot", "data": validation["optimization_plots"]["risk_contribution"]},
+                {"title": "Risk Contribution (Sector)", "type": "plot", "data": validation["optimization_plots"]["sector_risk_contribution"]},
+                {"title": "Rolling Sharpe", "type": "plot", "data": validation["optimization_plots"]["rolling_sharpe_plot"]},
+                {"title": "Efficient Frontier", "type": "plot", "data": validation["optimization_plots"]["frontier"]},
+                {"title": "Correlation Heatmap", "type": "plot", "data": validation["optimization_plots"]["heatmap"]},
+            ],
+        },
+        {
+            "title": "Walk-Forward Validation",
+            "description": f"Out-of-sample performance from {test_start_str} to {test_end_str}.",
+            "sidebar": [],
+            "main_content": [
+                {"title": "In-Sample vs Out-of-Sample Performance", "type": "table_html", "data": validation["table_html"]},
+                {"title": "Out-of-Sample Cumulative Returns", "type": "plot", "data": validation["validation_plots"]["cumulative_plot"]},
+                {"title": "Out-of-Sample Drawdown", "type": "plot", "data": validation["validation_plots"]["drawdown_plot"]},
+            ],
+        },
+        {
+            "title": "Monte Carlo Simulation",
+            "description": f"Simulation horizon matched to {validation['test_days']} trading days.",
+            "sidebar": [
+                {"title": "Simulation Risk Metrics", "type": "metrics", "data": validation["mc_metrics"]},
+                {"title": "Success Probabilities", "type": "metrics", "data": validation["mc_probs"]},
+            ],
+            "main_content": [
+                {"title": "Projected Future Paths", "type": "plot", "data": validation["mc_plots"]["paths"]},
+                {"title": "Distribution of Final Returns", "type": "plot", "data": validation["mc_plots"]["dist"]},
+                {"title": "Probability of Exceeding Return", "type": "plot", "data": validation["mc_plots"]["prob_curve"]},
+            ],
+        },
+    ]
+
+    axis_title_overrides = {
+        "Risk-Based Allocation Bar Chart": ("Ticker", "Portfolio Weight"),
+        "Portfolio Cumulative Returns": ("Date", "Growth of $1"),
+        "Portfolio Alpha/Beta Regression": (benchmark_ticker, "Portfolio Return"),
+        "Strategy Compositions (Asset)": (None, None),
+        "Strategy Compositions (Sector)": (None, None),
+        "Risk Contribution (Asset)": ("Portfolio", "Percent of Total Risk"),
+        "Risk Contribution (Sector)": ("Portfolio", "Percent of Total Risk"),
+        "Rolling Sharpe": ("Date", "Sharpe Ratio"),
+        "Efficient Frontier": ("Annualized Volatility (Risk)", "Annualized Return"),
+        "Correlation Heatmap": (None, None),
+        "Out-of-Sample Cumulative Returns": ("Date", "Growth of $1"),
+        "Out-of-Sample Drawdown": ("Date", "Drawdown"),
+        "Projected Future Paths": ("Trading Day", "Growth of $1"),
+        "Distribution of Final Returns": ("Final Return", "Frequency"),
+        "Probability of Exceeding Return": ("Return Threshold", "Probability"),
+    }
+
+    _emit_progress(0.91, "Formatting charts", "Preparing figures and tables for the dashboard view.", 5)
+    for section in sections:
+        for block in section.get("main_content", []):
+            if block.get("type") != "plot":
+                continue
+            xaxis_title, yaxis_title = axis_title_overrides.get(block["title"], (None, None))
+            block["data"] = _prepare_report_figure(
+                block["data"],
+                title=block["title"],
+                xaxis_title=xaxis_title,
+                yaxis_title=yaxis_title,
+                height=470 if "Composition" in block["title"] else 430,
+            )
+
+    _emit_progress(0.97, "Building HTML report", "Generating the downloadable report file.", 2)
+    generate_html_report(sections, title="Combined Portfolio Report", filename=report_file)
+    with open(report_file, "r", encoding="utf-8") as file_handle:
+        html_content = file_handle.read()
+
+    _emit_progress(1.0, "Report complete", "Dashboard and HTML export are ready.", 0)
+    return {
+        "html_content": html_content,
+        "risk_free_rate": risk_free_rate,
+        "sections": sections,
+    }
+
+
+def _render_deep_report_sections(report_context):
+    section_tabs = st.tabs([section["title"] for section in report_context["sections"]])
+    for tab, section in zip(section_tabs, report_context["sections"]):
+        with tab:
+            st.caption(section["description"])
+
+            if section["sidebar"]:
+                sidebar_cols = st.columns(len(section["sidebar"]))
+                for col, block in zip(sidebar_cols, section["sidebar"]):
+                    with col:
+                        st.markdown(f"#### {block['title']}")
+                        if block["type"] == "metrics":
+                            metrics_df = pd.DataFrame(
+                                list(block["data"].items()),
+                                columns=["Metric", "Value"],
+                            )
+                            st.dataframe(metrics_df.set_index("Metric"), use_container_width=True)
+                        elif block["type"] == "table_html":
+                            try:
+                                table_df = pd.read_html(StringIO(block["data"]))[0]
+                                st.dataframe(table_df, use_container_width=True)
+                            except Exception:
+                                st.markdown(block["data"], unsafe_allow_html=True)
+
+            for block in section["main_content"]:
+                st.markdown(f"#### {block['title']}")
+                if block["type"] == "plot":
+                    fig = _style_report_figure(block["data"], block["title"])
+                    if _figure_has_data(fig):
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info(f"{block['title']} is not available for the current data selection.")
+                elif block["type"] == "table_html":
+                    try:
+                        table_df = pd.read_html(StringIO(block["data"]))[0]
+                        st.dataframe(table_df, use_container_width=True)
+                    except Exception:
+                        st.markdown(block["data"], unsafe_allow_html=True)
+
 def _render_allocation(result, tickers):
     method = result.get("method", "standard")
 
@@ -93,15 +697,15 @@ def _render_allocation(result, tickers):
         # --- LSTM Views Table with animated spinners ---
         st.subheader("LSTM Model Views")
         st.caption(
-            "Confidence is derived from each model's directional accuracy. "
-            "Evolved = GA-optimized. Optimizing = GA running in background."
+            "Confidence is derived from directional accuracy when an evolved LSTM is available. "
+            "Otherwise the app uses a clearly labeled historical-mean fallback."
         )
 
         view_details = result.get("view_details", [])
 
         # Check for any queued/optimizing tickers
         has_optimizing = any(
-            v.get("model_source") in ("queued", "default")
+            v.get("model_source") == "queued"
             for v in view_details
         )
 
@@ -167,7 +771,8 @@ def _render_allocation(result, tickers):
                 <th>Predicted Price</th>
                 <th>Expected Return</th>
                 <th>Confidence</th>
-                <th>Model</th>
+                <th>Prediction Method</th>
+                <th>Model Status</th>
                 <th>Accuracy</th>
             </tr>
         </thead>
@@ -179,15 +784,20 @@ def _render_allocation(result, tickers):
             ret_class = "positive" if ret >= 0 else "negative"
             ret_str = f"{ret:+.2f}%"
 
-            source = v.get("model_source", "default")
+            source = v.get("model_source", "historical")
+            prediction_label = v.get("prediction_label", "Historical mean fallback")
             if source == "evolved":
-                model_cell = f'<span class="evolved-badge">Evolved</span>'
-            else:
+                model_cell = '<span class="evolved-badge">Evolved LSTM</span>'
+            elif source == "fallback":
+                model_cell = '<span class="optimizing-badge">Fallback from cached model</span>'
+            elif source == "queued":
                 model_cell = (
                     '<span class="optimizing-badge">'
                     '<span class="spinner"></span>Optimizing...'
                     '</span>'
                 )
+            else:
+                model_cell = '<span class="optimizing-badge">Historical fallback</span>'
 
             accuracy = v.get("accuracy")
             accuracy_str = f"{accuracy}%" if accuracy else "—"
@@ -199,6 +809,7 @@ def _render_allocation(result, tickers):
                 <td>${v['predicted_price']}</td>
                 <td class="{ret_class}">{ret_str}</td>
                 <td>{v['confidence']}%</td>
+                <td>{prediction_label}</td>
                 <td>{model_cell}</td>
                 <td>{accuracy_str}</td>
             </tr>
@@ -217,7 +828,7 @@ def _render_allocation(result, tickers):
         # Caption for queued tickers
         queued = [
             v["symbol"] for v in view_details
-            if v.get("model_source") in ("queued", "default")
+            if v.get("model_source") == "queued"
         ]
         if queued:
             st.caption(
@@ -244,37 +855,23 @@ def _render_allocation(result, tickers):
 
 def _run_allocation(tickers, risk_tolerance):
     """
-    Tries BL first. Falls back to standard optimizer on failure.
-    Stores result in session state.
+    Fast allocation via the standard risk-based optimizer.
+    BL with LSTM views is available in the dedicated Black-Litterman tab.
     """
-    with st.spinner("Running LSTM predictions and portfolio optimization..."):
-        # Try Black-Litterman first
-        try:
-            bl_resp = requests.post(
-                f"{API_URL}/bl-optimize/",
-                json={"tickers": tickers},
-                timeout=300
-            )
-            if bl_resp.status_code == 200:
-                result = bl_resp.json()
-                result["method"] = "bl"
-                st.session_state["allocation_result"] = result
-                _render_allocation(result, tickers)
-                return
-        except Exception:
-            pass
-
-        # Fallback to standard optimizer
+    with st.spinner("Generating allocation..."):
         try:
             std_resp = requests.post(
                 f"{API_URL}/optimize/",
-                json={"tickers": tickers, "risk_tolerance": risk_tolerance}
+                json={"tickers": tickers, "risk_tolerance": risk_tolerance},
+                timeout=15
             )
             if std_resp.status_code == 200:
                 result = std_resp.json()
                 result["method"] = "standard"
                 st.session_state["allocation_result"] = result
                 _render_allocation(result, tickers)
+            else:
+                st.error(f"Optimization returned status {std_resp.status_code}")
         except Exception as e:
             st.error(f"Optimization failed: {e}")
 
@@ -558,6 +1155,8 @@ with tab_bl:
         if bl_res and not bl_res.get("error"):
             st.divider()
             st.markdown("### Results")
+            benchmark_info = bl_res.get("benchmark", {})
+            benchmark_label = benchmark_info.get("label", benchmark_info.get("ticker", "Benchmark"))
             st.caption(
                 f"Delta (risk aversion): {bl_res['delta']} | "
                 f"Tau: {bl_res['tau']} | "
@@ -596,7 +1195,14 @@ with tab_bl:
             st.subheader("Return Comparison")
             ret_table = bl_res["return_table"]
             ret_df = pd.DataFrame(ret_table)
-            ret_df.columns = ["Ticker", "Pi (Eq Return %)", "BL Return %", "Difference %", "Optimal Weight"]
+            ret_df.columns = [
+                "Ticker",
+                f"Beta vs {benchmark_label}",
+                "Pi (Eq Return %)",
+                "BL Return %",
+                "Difference %",
+                "Optimal Weight",
+            ]
             ret_df["Optimal Weight"] = ret_df["Optimal Weight"].apply(lambda x: f"{x:.2%}")
 
             def _color_diff(val):
@@ -616,41 +1222,151 @@ with tab_bl:
                 ),
                 use_container_width=True
             )
+            st.caption(f"Beta is calculated from the same historical sample versus {benchmark_label}.")
 
-            # --- View decomposition chart ---
-            st.subheader("View Portfolio Decomposition")
+            # --- Time period performance summary ---
+            st.subheader("Time Period Performance")
+            prices_df = _history_payload_to_frame(bl_res.get("price_history"))
+            if not prices_df.empty:
+                min_history_date = prices_df.index.min().date()
+                max_history_date = prices_df.index.max().date()
+                default_from = max(min_history_date, max_history_date - timedelta(days=180))
+
+                perf_col1, perf_col2 = st.columns(2)
+                with perf_col1:
+                    perf_from = st.date_input(
+                        "From Date",
+                        value=default_from,
+                        min_value=min_history_date,
+                        max_value=max_history_date,
+                        key="bl_perf_from",
+                    )
+                with perf_col2:
+                    perf_to = st.date_input(
+                        "To Date",
+                        value=max_history_date,
+                        min_value=min_history_date,
+                        max_value=max_history_date,
+                        key="bl_perf_to",
+                    )
+
+                if perf_from >= perf_to:
+                    st.warning("Choose a valid performance range where the from date is before the to date.")
+                else:
+                    selected_prices = prices_df.loc[str(perf_from):str(perf_to)]
+                    if len(selected_prices) < 2:
+                        st.warning("Selected range does not contain enough data points.")
+                    else:
+                        equal_weight = {t: 1.0 / len(tks) for t in tks}
+                        bl_growth = _portfolio_growth(selected_prices, bl_w)
+                        eq_growth = _portfolio_growth(selected_prices, equal_weight)
+                        mcap_growth = _portfolio_growth(selected_prices, eq_w)
+                        bl_metrics = _performance_metrics(bl_growth)
+
+                        if bl_metrics:
+                            mc1, mc2, mc3 = st.columns(3)
+                            with mc1:
+                                st.metric("Total Return", f"{bl_metrics['total_return']:.2%}")
+                            with mc2:
+                                st.metric("Annualized Return", f"{bl_metrics['annualized_return']:.2%}")
+                            with mc3:
+                                st.metric(
+                                    "Max Drawdown",
+                                    f"{bl_metrics['max_drawdown']:.2%}",
+                                    delta_color="inverse",
+                                )
+
+                            base_capital = 10000.0
+                            pnl_value = base_capital * bl_metrics["total_return"]
+                            st.caption(
+                                f"Actual BL profit/loss over the selected period on a "
+                                f"${base_capital:,.0f} starting value: {pnl_value:+,.2f}"
+                            )
+
+                            comparison_df = pd.DataFrame({
+                                "BL Optimal": bl_growth,
+                                "Equal Weight": eq_growth,
+                                "Market Cap Weight": mcap_growth,
+                            }).dropna()
+
+                            perf_fig = go.Figure()
+                            for name, color in [
+                                ("BL Optimal", "#00CC96"),
+                                ("Equal Weight", "#636EFA"),
+                                ("Market Cap Weight", "#FFA15A"),
+                            ]:
+                                perf_fig.add_trace(go.Scatter(
+                                    x=comparison_df.index,
+                                    y=comparison_df[name],
+                                    mode="lines",
+                                    name=name,
+                                    line=dict(width=3 if name == "BL Optimal" else 2, color=color),
+                                ))
+                            perf_fig.update_layout(
+                                title="Cumulative Returns Over Selected Period",
+                                xaxis_title="Date",
+                                yaxis_title="Growth of $1",
+                                hovermode="x unified",
+                                margin=dict(t=50, b=30),
+                            )
+                            st.plotly_chart(perf_fig, use_container_width=True)
+
+            # --- Allocation impact from BL views ---
+            st.subheader("Allocation Tilt From Views")
+            tilt_vals = [bl_w.get(t, 0) - eq_w.get(t, 0) for t in tks]
+            tilt_fig = go.Figure()
+            tilt_fig.add_trace(go.Bar(
+                name="BL - Market Weight",
+                x=tks,
+                y=tilt_vals,
+                marker_color=["#00CC96" if v >= 0 else "#EF553B" for v in tilt_vals],
+                text=[f"{v:+.2%}" for v in tilt_vals],
+                textposition="outside",
+            ))
+            tilt_fig.update_layout(
+                yaxis_title="Weight Change",
+                xaxis_title="Ticker",
+                margin=dict(t=30, b=30),
+                showlegend=False,
+            )
+            st.plotly_chart(tilt_fig, use_container_width=True)
+            st.caption("Positive bars are overweight versus the market portfolio; negative bars are underweight.")
+
+            # --- View signal chart ---
+            st.subheader("View Signal Decomposition")
             view_decomp = bl_res.get("view_decomposition", [])
             if view_decomp:
-                # Stacked bar: market portfolio + each view contribution
                 decomp_fig = go.Figure()
-
-                # Market portfolio base
-                decomp_fig.add_trace(go.Bar(
-                    name="Market Portfolio",
-                    x=tks,
-                    y=[eq_w.get(t, 0) for t in tks],
-                    marker_color="#636EFA",
-                ))
-
                 colors = ["#EF553B", "#00CC96", "#AB63FA", "#FFA15A", "#19D3F3", "#FF6692"]
                 for idx, vd in enumerate(view_decomp):
                     lam = vd["lambda"]
                     vw = vd["weights"]
+                    direction = -1 if lam < 0 else 1
                     decomp_fig.add_trace(go.Bar(
                         name=f"View {idx + 1} (λ={lam:.4f})",
                         x=tks,
-                        y=[vw.get(t, 0) * lam for t in tks],
+                        y=[vw.get(t, 0) * direction for t in tks],
                         marker_color=colors[idx % len(colors)],
+                        hovertemplate=(
+                            f"View {idx + 1}<br>"
+                            "Ticker=%{x}<br>"
+                            "Directional exposure=%{y:.4f}<br>"
+                            f"Lambda={lam:.4f}<extra></extra>"
+                        ),
                     ))
 
                 decomp_fig.update_layout(
-                    barmode="stack",
-                    yaxis_title="Weight Contribution",
+                    barmode="group",
+                    yaxis_title="Normalized Directional Exposure",
                     xaxis_title="Ticker",
                     margin=dict(t=30, b=30),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02),
                 )
                 st.plotly_chart(decomp_fig, use_container_width=True)
+                st.caption(
+                    "This shows the normalized long/short direction of each view. "
+                    "Lambda is a view-strength coefficient, not a portfolio weight."
+                )
 
             # --- Implied views (reverse BL) ---
             st.subheader("Implied Views (Reverse Black-Litterman)")
@@ -726,7 +1442,10 @@ with tab_report:
     if not QUANT_REPORTER_AVAILABLE:
         st.error("`quant-reporter` library not installed. Please install it to use this feature.")
     else:
-        st.write("Generate a comprehensive PDF-style HTML report with Backtesting, Efficient Frontier, and Monte Carlo simulations.")
+        st.write(
+            "Generate a comprehensive report with backtesting, efficient frontier, "
+            "walk-forward validation, and Monte Carlo analysis."
+        )
         
         with st.expander("Report Configuration", expanded=True):
             col_in1, col_in2 = st.columns(2)
@@ -734,50 +1453,122 @@ with tab_report:
                 repo_tickers = st.text_input("Portfolio Tickers", "AAPL, MSFT, SPY, QQQ")
                 benchmark = st.text_input("Benchmark Ticker", "SPY")
             with col_in2:
-                # Dates
                 default_start = datetime.now() - timedelta(days=365*2)
                 start_date = st.date_input("Training Start Date", default_start)
-                end_date = st.date_input("Training End Date", datetime.now() - timedelta(days=90)) # Leave 90 days for Test
-                
-        if st.button("Generate Deep Report"):
+                end_date = st.date_input("Training End Date", datetime.now() - timedelta(days=90))
+                report_risk_tolerance = st.slider(
+                    "Risk Tolerance for Report Allocation",
+                    0.0, 1.0, 0.5, 0.05,
+                    key="deep_report_risk",
+                )
+
+        generate_report = st.button("Generate Deep Report", type="primary")
+
+        if generate_report:
+            st.session_state["deep_report_context"] = None
             r_tickers = [t.strip() for t in repo_tickers.split(",") if t.strip()]
             if not r_tickers:
                 st.warning("Enter tickers.")
             else:
-                weight = 1.0 / len(r_tickers)
-                portfolio_dict = {t: weight for t in r_tickers}
-                report_file = os.path.join(
-                    os.path.dirname(os.path.abspath(__file__)),
-                    "..",
-                    "portfolio_report.html"
+                report_started_at = time.time()
+                report_progress_placeholder = st.empty()
+                _render_deep_report_progress(
+                    report_progress_placeholder,
+                    0.03,
+                    "Preparing request",
+                    "Validating tickers and report dates.",
+                    report_started_at,
+                    eta_seconds=60,
                 )
-                report_file = os.path.normpath(report_file)
-                with st.spinner("Generating report... (this may take 30-60 seconds)"):
-                    try:
-                        qr.create_combined_report(
-                            portfolio_dict=portfolio_dict,
-                            benchmark_ticker=benchmark,
-                            train_start=start_date.strftime('%Y-%m-%d'),
-                            train_end=end_date.strftime('%Y-%m-%d'),
-                            filename=report_file
+
+                _render_deep_report_progress(
+                    report_progress_placeholder,
+                    0.10,
+                    "Validating benchmark",
+                    f"Checking benchmark history for {benchmark.strip().upper() or 'the selected symbol'}.",
+                    report_started_at,
+                    eta_seconds=55,
+                )
+                validated_benchmark, benchmark_error = _validate_benchmark_ticker(
+                    benchmark,
+                    start_date,
+                    end_date,
+                )
+                if benchmark_error:
+                    report_progress_placeholder.empty()
+                    st.error(benchmark_error)
+                else:
+                    _render_deep_report_progress(
+                        report_progress_placeholder,
+                        0.16,
+                        "Fetching allocation",
+                        "Requesting the starting portfolio weights from the backend.",
+                        report_started_at,
+                        eta_seconds=50,
+                    )
+                    allocation, alloc_error = _fetch_report_allocation(r_tickers, report_risk_tolerance)
+                    if alloc_error or not allocation:
+                        allocation = {t: 1.0 / len(r_tickers) for t in r_tickers}
+                        st.info(f"Using equal-weight allocation (backend: {alloc_error or 'unavailable'}).")
+                    if True:
+                        report_file = os.path.join(
+                            os.path.dirname(os.path.abspath(__file__)),
+                            "..",
+                            "portfolio_report.html"
                         )
-                        if os.path.exists(report_file):
-                            with open(report_file, 'r', encoding='utf-8') as f:
-                                html_content = f.read()
-                            st.success("Report Generated Successfully!")
-                            st.download_button(
-                                label="Download HTML Report",
-                                data=html_content,
-                                file_name="My_Quant_Report.html",
-                                mime="text/html"
+                        report_file = os.path.normpath(report_file)
+                        _render_deep_report_progress(
+                            report_progress_placeholder,
+                            0.22,
+                            "Collecting asset metadata",
+                            "Fetching sector details used in the report visuals.",
+                            report_started_at,
+                            eta_seconds=47,
+                        )
+                        sector_map = _fetch_sector_map(r_tickers)
+                        try:
+                            report_context = _build_deep_report_context(
+                                allocation,
+                                validated_benchmark,
+                                start_date,
+                                end_date,
+                                report_file,
+                                sector_map,
+                                report_risk_tolerance,
+                                progress_callback=lambda progress_value, stage_label, detail, eta_seconds=None: _render_deep_report_progress(
+                                    report_progress_placeholder,
+                                    progress_value,
+                                    stage_label,
+                                    detail,
+                                    report_started_at,
+                                    eta_seconds=eta_seconds,
+                                ),
                             )
-                            st.divider()
-                            st.subheader("Report Preview")
-                            components.html(html_content, height=800, scrolling=True)
-                        else:
-                            st.error(f"Report file not created at {report_file}. Check Django terminal for errors.")
-                    except Exception as e:
-                        import traceback
-                        st.error(f"Report Generation Failed: {e}")
-                        st.code(traceback.format_exc())
+                            st.session_state["deep_report_context"] = report_context
+                            st.success(
+                                f"Report generated successfully in {_format_duration(time.time() - report_started_at)}."
+                            )
+                        except Exception as e:
+                            import traceback
+                            st.session_state["deep_report_context"] = None
+                            st.error(f"Report generation failed: {e}")
+                            st.code(traceback.format_exc())
+
+        report_context = st.session_state.get("deep_report_context")
+        if report_context:
+            st.divider()
+            st.subheader("Deep Report Dashboard")
+            st.caption(
+                f"Risk-free rate used in the report: {report_context['risk_free_rate']:.2%}"
+            )
+            st.download_button(
+                label="Download HTML Report",
+                data=report_context["html_content"],
+                file_name="My_Quant_Report.html",
+                mime="text/html",
+            )
+            _render_deep_report_sections(report_context)
+
+            with st.expander("Legacy HTML Preview", expanded=False):
+                components.html(report_context["html_content"], height=800, scrolling=True)
 

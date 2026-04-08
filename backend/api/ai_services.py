@@ -2,8 +2,16 @@ import os
 import json
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from groq import Groq
 import yfinance as yf
+
+try:
+    _YF_CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache" / "yfinance"
+    _YF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    yf.set_tz_cache_location(str(_YF_CACHE_DIR))
+except Exception:
+    pass
 
 # --- PyTorch (replaces tensorflow) ---
 import torch
@@ -151,9 +159,18 @@ def get_price_history(symbol, period="6mo"):
         except Exception:
             pass  # Fall through to yfinance
 
-    # yfinance fallback
-    ticker = yf.Ticker(symbol)
-    return ticker.history(period=period)
+    # yfinance fallback. Use download() rather than Ticker.history() because
+    # the latter can fail on local cache initialization in some environments.
+    try:
+        hist = yf.download(symbol, period=period, progress=False, threads=False, auto_adjust=False)
+        if isinstance(hist, pd.DataFrame) and isinstance(hist.columns, pd.MultiIndex):
+            try:
+                hist = hist.droplevel(-1, axis=1)
+            except Exception:
+                hist.columns = hist.columns.get_level_values(0)
+        return hist if hist is not None and not hist.empty else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 
 def get_ticker_info(symbol):
@@ -234,6 +251,140 @@ class TrendPredictor:
                 ),
             })
         return parsed
+
+    @staticmethod
+    def _get_close_series(price_frame):
+        if price_frame is None or getattr(price_frame, "empty", True):
+            return pd.Series(dtype=float)
+
+        close = price_frame["Close"] if "Close" in price_frame else price_frame
+        if isinstance(close, pd.DataFrame):
+            if close.shape[1] == 1:
+                close = close.iloc[:, 0]
+            else:
+                close = close.squeeze()
+
+        close = pd.to_numeric(close, errors="coerce").dropna()
+        close.name = "Close"
+        return close
+
+    @staticmethod
+    def _select_prediction_benchmark(symbol):
+        return "^NSEI" if symbol.endswith((".NS", ".BO")) else "SPY"
+
+    @staticmethod
+    def _historical_mean_projection(symbol, lookback_days=252):
+        """
+        Simple and explicit fallback when no reliable LSTM is available:
+        use the mean daily excess return over the last 252 trading days,
+        anchored to a broad market benchmark.
+        """
+        hist = get_price_history(symbol, period="2y")
+        close = TrendPredictor._get_close_series(hist)
+        if close.empty or len(close) < 20:
+            return None
+
+        current_price = float(close.iloc[-1])
+        asset_returns = close.pct_change().dropna()
+        if asset_returns.empty:
+            return None
+
+        benchmark_symbol = TrendPredictor._select_prediction_benchmark(symbol)
+        benchmark_close = TrendPredictor._get_close_series(
+            get_price_history(benchmark_symbol, period="2y")
+        )
+        benchmark_returns = benchmark_close.pct_change().dropna() if not benchmark_close.empty else pd.Series(dtype=float)
+
+        aligned_asset = asset_returns
+        aligned_benchmark = benchmark_returns
+        benchmark_used = False
+
+        if not benchmark_returns.empty:
+            aligned_asset, aligned_benchmark = asset_returns.align(
+                benchmark_returns,
+                join="inner",
+            )
+            benchmark_used = len(aligned_asset) >= 20
+
+        sample_size = min(len(aligned_asset), lookback_days)
+        if sample_size < 20:
+            sample_size = min(len(asset_returns), lookback_days)
+            asset_window = asset_returns.tail(sample_size)
+            mean_daily_return = float(asset_window.mean())
+            mean_daily_excess = None
+            benchmark_daily_return = None
+            benchmark_used = False
+        else:
+            asset_window = aligned_asset.tail(sample_size)
+            benchmark_window = aligned_benchmark.tail(sample_size)
+            mean_daily_excess = float((asset_window - benchmark_window).mean())
+            benchmark_daily_return = float(benchmark_window.mean())
+            mean_daily_return = mean_daily_excess + benchmark_daily_return
+
+        mean_daily_return = float(np.clip(mean_daily_return, -0.25, 0.25))
+        projected_price = current_price * (1.0 + mean_daily_return)
+        label = (
+            f"Historical mean daily excess return vs {benchmark_symbol} ({sample_size}d)"
+            if benchmark_used
+            else f"Historical mean daily return ({sample_size}d)"
+        )
+
+        return {
+            "predicted_price": float(projected_price),
+            "expected_return": float(mean_daily_return),
+            "prediction_method": "historical_mean_fallback",
+            "prediction_label": label,
+            "benchmark_symbol": benchmark_symbol if benchmark_used else None,
+            "mean_daily_excess": mean_daily_excess,
+            "benchmark_daily_return": benchmark_daily_return,
+            "lookback_days": int(sample_size),
+        }
+
+    @staticmethod
+    def forecast_price(
+        symbol,
+        hidden_size=64,
+        num_layers=2,
+        learning_rate=0.001,
+        epochs=30,
+        dropout=0.0,
+        seq_len=20,
+        allow_lstm=True,
+    ):
+        if allow_lstm:
+            lstm_price = TrendPredictor._lstm_predict(
+                symbol,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                learning_rate=learning_rate,
+                epochs=epochs,
+                dropout=dropout,
+                seq_len=seq_len,
+            )
+
+            latest_close = TrendPredictor._get_close_series(
+                get_price_history(symbol, period="5d")
+            )
+            if (
+                lstm_price is not None
+                and np.isfinite(lstm_price)
+                and lstm_price > 0
+                and not latest_close.empty
+            ):
+                current_price = float(latest_close.iloc[-1])
+                expected_return = float((lstm_price - current_price) / current_price)
+                return {
+                    "predicted_price": float(lstm_price),
+                    "expected_return": expected_return,
+                    "prediction_method": "lstm",
+                    "prediction_label": "Evolved LSTM next-day forecast",
+                    "benchmark_symbol": None,
+                    "mean_daily_excess": None,
+                    "benchmark_daily_return": None,
+                    "lookback_days": None,
+                }
+
+        return TrendPredictor._historical_mean_projection(symbol)
 
     @staticmethod
     def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30, dropout=0.0, seq_len=20):
@@ -390,21 +541,24 @@ class TrendPredictor:
             bullish_votes = sum(1 for s in signals if "Bullish" in s or "Oversold" in s)
             bearish_votes = sum(1 for s in signals if "Bearish" in s or "Overbought" in s)
 
-            # LSTM price prediction — uses evolved hyperparams if available
-            lstm_price = TrendPredictor._lstm_predict(
+            forecast = TrendPredictor.forecast_price(
                 symbol,
                 hidden_size=hidden_size,
                 num_layers=num_layers,
                 learning_rate=learning_rate,
                 epochs=epochs,
                 dropout=dropout,
-                seq_len=seq_len
+                seq_len=seq_len,
+                allow_lstm=(hyperparams_source == "evolved"),
             )
+            predicted_price = float(forecast["predicted_price"]) if forecast else float(recent_close)
+            prediction_method = forecast["prediction_method"] if forecast else "technical_signal_fallback"
+            prediction_label = forecast["prediction_label"] if forecast else "Technical signal fallback"
 
-            if lstm_price is not None:
-                if lstm_price > recent_close:
+            if predicted_price is not None:
+                if predicted_price > recent_close:
                     trend = "UP"
-                elif lstm_price < recent_close:
+                elif predicted_price < recent_close:
                     trend = "DOWN"
                 else:
                     trend = "NEUTRAL"
@@ -416,7 +570,6 @@ class TrendPredictor:
                 else:
                     trend = "NEUTRAL"
 
-            predicted_price = lstm_price if lstm_price is not None else recent_close * 1.001
             last_30_days_prices = hist_daily["Close"].tail(30).tolist()
 
             # ---- AI Reasoning ----
@@ -472,6 +625,8 @@ class TrendPredictor:
                 ),
                 "reasoning": ai_reasoning,
                 "hyperparams_source": hyperparams_source,
+                "prediction_method": prediction_method,
+                "prediction_label": prediction_label,
             }
 
         except Exception as e:
@@ -485,19 +640,64 @@ class TrendPredictor:
 
 class PortfolioOptimizer:
     @staticmethod
+    def _extract_weight_series(weights_df, tickers):
+        if weights_df is None or getattr(weights_df, "empty", True):
+            raise ValueError("Optimizer returned no weights.")
+
+        if isinstance(weights_df, pd.Series):
+            series = weights_df.astype(float)
+        elif "weights" in weights_df.columns:
+            series = weights_df["weights"].astype(float)
+        else:
+            series = weights_df.iloc[:, 0].astype(float)
+
+        series = series.reindex(tickers).fillna(0.0)
+        return series
+
+    @staticmethod
+    def _normalize_weight_series(weight_series, tickers, min_weight=0.001):
+        series = pd.Series(weight_series, dtype=float).reindex(tickers).fillna(0.0)
+        series = series.clip(lower=0.0)
+        total = float(series.sum())
+        if total <= 1e-10:
+            return pd.Series({t: 1.0 / len(tickers) for t in tickers})
+
+        series = series / total
+        series = series[series >= min_weight]
+        if series.empty:
+            return pd.Series({t: 1.0 / len(tickers) for t in tickers})
+
+        return series / float(series.sum())
+
+    @staticmethod
+    def _blend_profiles(conservative, balanced, aggressive, risk_tolerance):
+        risk_tolerance = float(np.clip(risk_tolerance, 0.0, 1.0))
+        if risk_tolerance <= 0.5:
+            alpha = risk_tolerance / 0.5
+            blended = conservative * (1.0 - alpha) + balanced * alpha
+            blend_meta = {"from": "HRP", "to": "Min CVaR", "alpha": round(alpha, 4)}
+        else:
+            alpha = (risk_tolerance - 0.5) / 0.5
+            blended = balanced * (1.0 - alpha) + aggressive * alpha
+            blend_meta = {"from": "Min CVaR", "to": "Max Sharpe", "alpha": round(alpha, 4)}
+        return blended, blend_meta
+
+    @staticmethod
     def optimize(tickers, risk_tolerance):
         """
-        risk_tolerance 0.0 – 0.33 → HRP  (Hierarchical Risk Parity)
-        risk_tolerance 0.34 – 0.66 → Min CVaR (Conditional Value at Risk)
-        risk_tolerance 0.67 – 1.0  → Max Sharpe (Mean-Variance)
-        Falls back to equal-weight if data is insufficient.
+        Builds conservative, balanced, and aggressive portfolios, then blends
+        them continuously so allocations respond smoothly to risk_tolerance.
         """
         try:
+            from pypfopt import EfficientFrontier, expected_returns, risk_models
+
             frames = {}
             for t in tickers:
                 hist = get_price_history(t, period="2y")
                 if hist is not None and not hist.empty:
-                    frames[t] = hist["Close"]
+                    close = TrendPredictor._get_close_series(hist)
+                    if not close.empty:
+                        frames[t] = close
 
             if len(frames) < 2:
                 raise ValueError("Need at least 2 tickers with data.")
@@ -506,39 +706,43 @@ class PortfolioOptimizer:
             if len(prices) < 60:
                 raise ValueError("Not enough historical data.")
 
-            returns = prices.pct_change().dropna()
+            daily_returns = prices.pct_change().dropna()
+            valid_tickers = list(daily_returns.columns)
+            mu = expected_returns.mean_historical_return(prices)
+            cov = risk_models.CovarianceShrinkage(prices).ledoit_wolf()
 
-            if risk_tolerance < 0.34:
-                # HRP — best diversification, no matrix inversion needed
-                hrp     = rp.HCPortfolio(returns=returns)
-                w       = hrp.optimization(
-                    model="HRP", codependence="pearson",
-                    rm="MV", rf=0, linkage="ward",
-                    max_k=10, leaf_order=True
-                )
-                weights = w["weights"].to_dict()
+            # Conservative: inverse volatility weighting.
+            vols = daily_returns.std().replace(0, np.nan)
+            conservative = (1.0 / vols).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            conservative = PortfolioOptimizer._normalize_weight_series(conservative, valid_tickers)
 
-            elif risk_tolerance < 0.67:
-                # Minimum CVaR — controls tail risk
-                port = rp.Portfolio(returns=returns)
-                port.assets_stats(method_mu="hist", method_cov="hist")
-                w = port.optimization(
-                    model="Classic", rm="CVaR", obj="MinRisk",
-                    rf=0.05, l=0, hist=True
-                )
-                weights = w["weights"].to_dict()
+            # Balanced: minimum volatility portfolio.
+            ef_min_vol = EfficientFrontier(mu, cov, weight_bounds=(0, 1))
+            ef_min_vol.min_volatility()
+            balanced = PortfolioOptimizer._extract_weight_series(
+                pd.Series(ef_min_vol.clean_weights()),
+                valid_tickers,
+            )
 
-            else:
-                # Maximum Sharpe — aggressive growth
-                port = rp.Portfolio(returns=returns)
-                port.assets_stats(method_mu="hist", method_cov="hist")
-                w = port.optimization(
-                    model="Classic", rm="MV", obj="Sharpe",
-                    rf=0.05, l=0, hist=True
-                )
-                weights = w["weights"].to_dict()
+            # Aggressive: maximum Sharpe, with a stable fallback.
+            ef_max_sharpe = EfficientFrontier(mu, cov, weight_bounds=(0, 1))
+            try:
+                ef_max_sharpe.max_sharpe(risk_free_rate=0.02)
+            except Exception:
+                ef_max_sharpe.max_quadratic_utility(risk_aversion=0.5)
+            aggressive = PortfolioOptimizer._extract_weight_series(
+                pd.Series(ef_max_sharpe.clean_weights()),
+                valid_tickers,
+            )
 
-            return {k: round(float(v), 4) for k, v in weights.items() if float(v) > 0.001}
+            blended, _ = PortfolioOptimizer._blend_profiles(
+                conservative,
+                balanced,
+                aggressive,
+                risk_tolerance,
+            )
+            cleaned = PortfolioOptimizer._normalize_weight_series(blended, valid_tickers)
+            return {k: round(float(v), 4) for k, v in cleaned.items()}
 
         except Exception:
             n = len(tickers)
