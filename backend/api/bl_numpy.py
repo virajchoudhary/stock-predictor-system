@@ -128,6 +128,40 @@ def serialize_history(price_frame):
     }
 
 
+def compute_realized_window_returns(prices, benchmark_prices=None, trading_days=30):
+    if prices is None or len(prices) < 2:
+        return None
+
+    window_days = int(max(1, min(trading_days, len(prices) - 1)))
+    window_prices = prices.iloc[-(window_days + 1):]
+
+    asset_returns = (
+        (window_prices.iloc[-1] / window_prices.iloc[0] - 1.0) * 100.0
+    ).to_dict()
+    benchmark_return_pct = None
+
+    if benchmark_prices is not None and len(benchmark_prices) >= len(window_prices):
+        benchmark_window = benchmark_prices.reindex(window_prices.index).dropna()
+        if len(benchmark_window) >= 2:
+            benchmark_return_pct = float(
+                (benchmark_window.iloc[-1] / benchmark_window.iloc[0] - 1.0) * 100.0
+            )
+
+    return {
+        "trading_days": window_days,
+        "start": window_prices.index[0].strftime("%Y-%m-%d"),
+        "end": window_prices.index[-1].strftime("%Y-%m-%d"),
+        "asset_returns_pct": {
+            ticker: round(float(value), 2)
+            for ticker, value in asset_returns.items()
+        },
+        "benchmark_return_pct": (
+            round(float(benchmark_return_pct), 2)
+            if benchmark_return_pct is not None else None
+        ),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Covariance & delta
 # ---------------------------------------------------------------------------
@@ -408,6 +442,11 @@ def run_bl_analysis(tickers, market_weights, views, tau=0.05, risk_free_rate=0.0
     betas = compute_asset_betas(prices, benchmark_prices) if benchmark_prices is not None else {
         t: 0.0 for t in valid_tickers
     }
+    sample_window = {
+        "start": prices.index.min().strftime("%Y-%m-%d"),
+        "end": prices.index.max().strftime("%Y-%m-%d"),
+        "trading_days": max(len(prices) - 1, 0),
+    }
 
     # 3. Market weights vector
     w_mkt = np.array([market_weights.get(t, 1.0 / N) for t in valid_tickers])
@@ -509,15 +548,36 @@ def run_bl_analysis(tickers, market_weights, views, tau=0.05, risk_free_rate=0.0
     mkt_sharpe = round((mkt_ret - risk_free_rate) / mkt_vol, 3) if mkt_vol > 1e-10 else 0.0
 
     # 15. Build return table
+    default_realized_window = compute_realized_window_returns(
+        prices,
+        benchmark_prices=benchmark_prices,
+        trading_days=30,
+    )
     return_table = []
     for i, t in enumerate(valid_tickers):
+        realized_return_pct = None
+        excess_vs_benchmark_pct = None
+        benchmark_return_pct = None
+        if default_realized_window is not None:
+            realized_return_pct = default_realized_window["asset_returns_pct"].get(t)
+            benchmark_return_pct = default_realized_window.get("benchmark_return_pct")
+            if realized_return_pct is not None and benchmark_return_pct is not None:
+                excess_vs_benchmark_pct = round(
+                    float(realized_return_pct - benchmark_return_pct),
+                    2,
+                )
+
         return_table.append({
             "ticker": t,
-            "beta": round(float(betas.get(t, 0.0)), 3),
-            "pi": round(float(Pi[i]) * 100, 2),
-            "bl_return": round(float(E[i]) * 100, 2),
-            "difference": round(float((E[i] - Pi[i])) * 100, 2),
-            "optimal_weight": bl_weights.get(t, 0.0),
+            "beta_vs_benchmark": round(float(betas.get(t, 0.0)), 3),
+            "equilibrium_return_pct": round(float(Pi[i]) * 100, 2),
+            "posterior_return_pct": round(float(E[i]) * 100, 2),
+            "market_weight": eq_weights.get(t, 0.0),
+            "bl_weight": bl_weights.get(t, 0.0),
+            "weight_tilt": round(float(bl_weights.get(t, 0.0) - eq_weights.get(t, 0.0)), 4),
+            "realized_return_pct": realized_return_pct,
+            "benchmark_return_pct": benchmark_return_pct,
+            "excess_vs_benchmark_pct": excess_vs_benchmark_pct,
         })
 
     return {
@@ -530,6 +590,8 @@ def run_bl_analysis(tickers, market_weights, views, tau=0.05, risk_free_rate=0.0
             "ticker": benchmark_ticker,
             "label": BENCHMARK_LABELS.get(benchmark_ticker, benchmark_ticker),
         },
+        "benchmark_window": sample_window,
+        "realized_window": default_realized_window,
         "price_history": serialize_history(prices),
         "benchmark_history": (
             serialize_history(benchmark_prices.to_frame(name=benchmark_ticker))

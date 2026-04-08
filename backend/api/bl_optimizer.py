@@ -148,10 +148,11 @@ def run_black_litterman(tickers):
         bl_returns: {symbol: expected_return_%}
         error: str or None
     """
+    requested_tickers = [str(t).upper() for t in tickers]
     try:
         # --- Price data ---
         frames = {}
-        for t in tickers:
+        for t in requested_tickers:
             hist = get_price_history(t, period="2y")
             if hist is not None and not hist.empty:
                 close_series = TrendPredictor._get_close_series(hist)
@@ -226,14 +227,28 @@ def run_black_litterman(tickers):
         ef.max_sharpe(risk_free_rate=0.05)
         weights = ef.clean_weights()
 
-        allocation = {k: round(float(v), 4) for k, v in weights.items() if float(v) > 0.001}
+        allocation = {
+            ticker: round(float(weights.get(ticker, 0.0)), 4)
+            for ticker in valid_tickers
+        }
 
-        bl_returns_pct = {k: round(float(v) * 100, 2) for k, v in bl_returns.items()}
+        bl_returns_pct = {
+            ticker: round(float(bl_returns.get(ticker, 0.0)) * 100, 2)
+            for ticker in valid_tickers
+        }
+        missing_view_tickers = [ticker for ticker in valid_tickers if ticker not in views]
 
         return {
             "allocation":   allocation,
             "view_details": view_details,
             "bl_returns":   bl_returns_pct,
+            "requested_tickers": requested_tickers,
+            "valid_tickers": valid_tickers,
+            "dropped_tickers": [ticker for ticker in requested_tickers if ticker not in valid_tickers],
+            "view_tickers": view_symbols,
+            "missing_view_tickers": missing_view_tickers,
+            "source": "bl",
+            "fallback_reason": None,
             "error":        None
         }
 

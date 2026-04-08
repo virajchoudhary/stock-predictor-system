@@ -639,6 +639,10 @@ class TrendPredictor:
 # ---------------------------------------------------------------------------
 
 class PortfolioOptimizer:
+    MAX_SINGLE_WEIGHT = 0.60
+    MIN_BREADTH = 3
+    MIN_POSITION_WEIGHT = 0.01
+
     @staticmethod
     def _extract_weight_series(weights_df, tickers):
         if weights_df is None or getattr(weights_df, "empty", True):
@@ -655,19 +659,119 @@ class PortfolioOptimizer:
         return series
 
     @staticmethod
-    def _normalize_weight_series(weight_series, tickers, min_weight=0.001):
+    def _normalize_weight_series(weight_series, tickers):
         series = pd.Series(weight_series, dtype=float).reindex(tickers).fillna(0.0)
         series = series.clip(lower=0.0)
         total = float(series.sum())
         if total <= 1e-10:
             return pd.Series({t: 1.0 / len(tickers) for t in tickers})
 
-        series = series / total
-        series = series[series >= min_weight]
-        if series.empty:
-            return pd.Series({t: 1.0 / len(tickers) for t in tickers})
+        return series / total
 
-        return series / float(series.sum())
+    @staticmethod
+    def _enforce_min_breadth(weight_series, tickers):
+        series = PortfolioOptimizer._normalize_weight_series(weight_series, tickers)
+
+        if len(tickers) < PortfolioOptimizer.MIN_BREADTH:
+            return series
+
+        top_tickers = list(series.sort_values(ascending=False).index[:PortfolioOptimizer.MIN_BREADTH])
+        adjusted = series.copy()
+
+        for ticker in top_tickers:
+            adjusted.loc[ticker] = max(
+                float(adjusted.loc[ticker]),
+                PortfolioOptimizer.MIN_POSITION_WEIGHT,
+            )
+
+        min_allowed = pd.Series(0.0, index=adjusted.index)
+        min_allowed.loc[top_tickers] = PortfolioOptimizer.MIN_POSITION_WEIGHT
+        excess = float(adjusted.sum() - 1.0)
+
+        if excess > 1e-10:
+            headroom = (adjusted - min_allowed).clip(lower=0.0)
+            headroom_total = float(headroom.sum())
+            if headroom_total <= 1e-10:
+                return PortfolioOptimizer._normalize_weight_series(series, tickers)
+            adjusted -= headroom / headroom_total * excess
+
+        return PortfolioOptimizer._normalize_weight_series(adjusted, tickers)
+
+    @staticmethod
+    def _apply_max_weight_cap(weight_series, tickers):
+        series = PortfolioOptimizer._normalize_weight_series(weight_series, tickers)
+        max_weight = PortfolioOptimizer.MAX_SINGLE_WEIGHT
+
+        for _ in range(len(tickers) + 2):
+            over_cap = series > max_weight + 1e-10
+            if not over_cap.any():
+                break
+
+            capped = series.copy()
+            capped.loc[over_cap] = max_weight
+            excess = float(1.0 - capped.sum())
+            if excess <= 1e-10:
+                series = PortfolioOptimizer._normalize_weight_series(capped, tickers)
+                continue
+
+            under_cap = capped < max_weight - 1e-10
+            if not under_cap.any():
+                series = PortfolioOptimizer._normalize_weight_series(capped, tickers)
+                break
+
+            redistribution_base = series.loc[under_cap].clip(lower=0.0)
+            redistribution_total = float(redistribution_base.sum())
+            if redistribution_total <= 1e-10:
+                redistribution_base = pd.Series(
+                    1.0,
+                    index=capped.index[under_cap],
+                    dtype=float,
+                )
+                redistribution_total = float(redistribution_base.sum())
+
+            capped.loc[under_cap] += redistribution_base / redistribution_total * excess
+            series = PortfolioOptimizer._normalize_weight_series(capped, tickers)
+
+        return series.clip(upper=max_weight)
+
+    @staticmethod
+    def _stabilize_weight_series(weight_series, tickers):
+        series = PortfolioOptimizer._normalize_weight_series(weight_series, tickers)
+        series = PortfolioOptimizer._enforce_min_breadth(series, tickers)
+        series = PortfolioOptimizer._apply_max_weight_cap(series, tickers)
+        series = PortfolioOptimizer._enforce_min_breadth(series, tickers)
+        return PortfolioOptimizer._normalize_weight_series(series, tickers)
+
+    @staticmethod
+    def _build_result(
+        requested_tickers,
+        valid_tickers,
+        allocation,
+        source,
+        blend_meta=None,
+        fallback_reason=None,
+    ):
+        ordered_allocation = {
+            ticker: round(float(pd.Series(allocation, dtype=float).reindex(valid_tickers).fillna(0.0).loc[ticker]), 4)
+            for ticker in valid_tickers
+        }
+        return {
+            "allocation": ordered_allocation,
+            "requested_tickers": requested_tickers,
+            "valid_tickers": valid_tickers,
+            "dropped_tickers": [ticker for ticker in requested_tickers if ticker not in valid_tickers],
+            "source": source,
+            "blend_meta": blend_meta or {},
+            "fallback_reason": fallback_reason,
+            "constraints": {
+                "max_single_weight": PortfolioOptimizer.MAX_SINGLE_WEIGHT,
+                "min_positions_over_one_pct": (
+                    PortfolioOptimizer.MIN_BREADTH
+                    if len(valid_tickers) >= PortfolioOptimizer.MIN_BREADTH
+                    else len(valid_tickers)
+                ),
+            },
+        }
 
     @staticmethod
     def _blend_profiles(conservative, balanced, aggressive, risk_tolerance):
@@ -688,11 +792,12 @@ class PortfolioOptimizer:
         Builds conservative, balanced, and aggressive portfolios, then blends
         them continuously so allocations respond smoothly to risk_tolerance.
         """
+        requested_tickers = [str(t).upper() for t in tickers]
         try:
             from pypfopt import EfficientFrontier, expected_returns, risk_models
 
             frames = {}
-            for t in tickers:
+            for t in requested_tickers:
                 hist = get_price_history(t, period="2y")
                 if hist is not None and not hist.empty:
                     close = TrendPredictor._get_close_series(hist)
@@ -735,15 +840,35 @@ class PortfolioOptimizer:
                 valid_tickers,
             )
 
-            blended, _ = PortfolioOptimizer._blend_profiles(
+            blended, blend_meta = PortfolioOptimizer._blend_profiles(
                 conservative,
                 balanced,
                 aggressive,
                 risk_tolerance,
             )
-            cleaned = PortfolioOptimizer._normalize_weight_series(blended, valid_tickers)
-            return {k: round(float(v), 4) for k, v in cleaned.items()}
+            cleaned = PortfolioOptimizer._stabilize_weight_series(blended, valid_tickers)
+            return PortfolioOptimizer._build_result(
+                requested_tickers=requested_tickers,
+                valid_tickers=valid_tickers,
+                allocation=cleaned,
+                source="risk_based",
+                blend_meta=blend_meta,
+                fallback_reason=None,
+            )
 
-        except Exception:
-            n = len(tickers)
-            return {t: round(1.0 / n, 4) for t in tickers}
+        except Exception as exc:
+            valid_tickers = requested_tickers[:]
+            if not valid_tickers:
+                valid_tickers = ["SPY"]
+            fallback_weights = pd.Series(
+                {ticker: 1.0 / len(valid_tickers) for ticker in valid_tickers},
+                dtype=float,
+            )
+            return PortfolioOptimizer._build_result(
+                requested_tickers=requested_tickers or valid_tickers,
+                valid_tickers=valid_tickers,
+                allocation=fallback_weights,
+                source="risk_based",
+                blend_meta={},
+                fallback_reason=str(exc),
+            )

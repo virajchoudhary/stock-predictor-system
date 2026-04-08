@@ -11,4 +11,6 @@ celerybeat-schedule-wal
 portfolio_report.html
 backend/db.sqlite3
 frontend/venv/
+logs/
+*.log
 

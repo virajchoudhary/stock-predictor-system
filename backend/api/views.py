@@ -72,7 +72,8 @@ class PortfolioOptimizationView(APIView):
         except Exception:
             pass  # never block the optimization request
 
-        allocation = PortfolioOptimizer.optimize(tickers, risk_tolerance)
+        optimization_result = PortfolioOptimizer.optimize(tickers, risk_tolerance)
+        allocation = optimization_result.get("allocation", {})
 
         reasoning = _timed_call(
             lambda: GroqService.analyze_allocation(tickers, allocation, risk_tolerance),
@@ -81,7 +82,7 @@ class PortfolioOptimizationView(APIView):
         )
 
         return Response({
-            'allocation': allocation,
+            **optimization_result,
             'reasoning': reasoning
         })
 
@@ -154,10 +155,8 @@ class BLOptimizationView(APIView):
         )
 
         return Response({
-            'allocation':   result['allocation'],
-            'view_details': result['view_details'],
-            'bl_returns':   result['bl_returns'],
-            'reasoning':    reasoning
+            **result,
+            'reasoning': reasoning
         })
 
 

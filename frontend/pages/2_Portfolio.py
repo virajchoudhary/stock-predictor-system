@@ -6,10 +6,19 @@ import numpy as np
 import time
 import threading
 import os
+import sys
 import html
 from io import StringIO
 from datetime import datetime, timedelta
 import streamlit.components.v1 as components
+
+_FRONTEND_ROOT = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+)
+if _FRONTEND_ROOT not in sys.path:
+    sys.path.insert(0, _FRONTEND_ROOT)
+
+from reporting_utils import resolve_report_universe
 
 # Import quant_reporter
 try:
@@ -98,17 +107,21 @@ def _render_allocation_charts(allocation):
     if not allocation:
         st.warning("No allocation data.")
         return
+    display_allocation = {
+        ticker: weight for ticker, weight in allocation.items()
+        if float(weight) > 0.0005
+    } or allocation
     col_chart, col_table = st.columns(2)
     with col_chart:
         fig = go.Figure(data=[go.Pie(
-            labels=list(allocation.keys()),
-            values=list(allocation.values()),
+            labels=list(display_allocation.keys()),
+            values=list(display_allocation.values()),
             hole=0.4
         )])
         fig.update_layout(margin=dict(t=0, b=0, l=0, r=0))
         st.plotly_chart(fig, width='stretch')
     with col_table:
-        df = pd.DataFrame(list(allocation.items()), columns=["Ticker", "Weight"])
+        df = pd.DataFrame(list(display_allocation.items()), columns=["Ticker", "Weight"])
         df["Weight"] = df["Weight"].apply(lambda x: f"{x:.1%}")
         st.table(df.set_index("Ticker"))
 
@@ -189,6 +202,140 @@ def _history_payload_to_frame(payload):
     return frame.sort_index()
 
 
+def _first_non_null(*values):
+    for value in values:
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except TypeError:
+            pass
+        return value
+    return None
+
+
+def _coerce_numeric(value, as_fraction=False):
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        normalized = value.replace(",", "").strip()
+        if not normalized:
+            return None
+        has_percent = normalized.endswith("%")
+        if has_percent:
+            normalized = normalized[:-1].strip()
+        try:
+            number = float(normalized)
+        except ValueError:
+            return None
+        if as_fraction and (has_percent or abs(number) > 1.0):
+            return number / 100.0
+        return number
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if as_fraction and abs(number) > 1.0:
+        return number / 100.0
+    return number
+
+
+def _format_weight_fraction(value):
+    weight = _coerce_numeric(value, as_fraction=True)
+    if weight is None:
+        return "N/A"
+    return f"{weight:.2%}"
+
+
+def _build_bl_return_frame(bl_res, tickers):
+    raw_rows = {}
+    for row in bl_res.get("return_table", []) or []:
+        ticker = _first_non_null(row.get("ticker"), row.get("Ticker"))
+        if ticker:
+            raw_rows[str(ticker)] = row
+
+    equilibrium_returns = bl_res.get("equilibrium_returns", {})
+    posterior_returns = bl_res.get("posterior_returns", {})
+    betas = bl_res.get("betas", {})
+    equilibrium_weights = bl_res.get("equilibrium_weights", {})
+    bl_weights = bl_res.get("bl_weights", {})
+
+    normalized_rows = []
+    ordered_tickers = tickers or list(raw_rows.keys()) or list(bl_weights.keys()) or list(equilibrium_weights.keys())
+    for ticker in ordered_tickers:
+        raw = raw_rows.get(ticker, {})
+
+        market_weight = _coerce_numeric(
+            _first_non_null(
+                equilibrium_weights.get(ticker),
+                raw.get("market_weight"),
+                raw.get("Market Weight"),
+                raw.get("equilibrium_weight"),
+            ),
+            as_fraction=True,
+        )
+        bl_weight = _coerce_numeric(
+            _first_non_null(
+                bl_weights.get(ticker),
+                raw.get("bl_weight"),
+                raw.get("BL Weight"),
+                raw.get("optimal_weight"),
+                raw.get("Optimal Weight"),
+            ),
+            as_fraction=True,
+        )
+        weight_tilt = _coerce_numeric(
+            _first_non_null(raw.get("weight_tilt"), raw.get("Weight Tilt")),
+            as_fraction=True,
+        )
+
+        if market_weight is None:
+            market_weight = 0.0
+        if bl_weight is None:
+            bl_weight = 0.0
+        if weight_tilt is None:
+            weight_tilt = bl_weight - market_weight
+
+        normalized_rows.append({
+            "ticker": ticker,
+            "beta_vs_benchmark": _coerce_numeric(
+                _first_non_null(
+                    betas.get(ticker),
+                    raw.get("beta_vs_benchmark"),
+                    raw.get("Beta vs S&P 500"),
+                    raw.get("Beta"),
+                )
+            ),
+            "equilibrium_return_pct": _coerce_numeric(
+                _first_non_null(
+                    equilibrium_returns.get(ticker),
+                    raw.get("equilibrium_return_pct"),
+                    raw.get("pi_return_pct"),
+                    raw.get("Pi (Eq Return %)"),
+                    raw.get("Equilibrium Return %"),
+                )
+            ),
+            "posterior_return_pct": _coerce_numeric(
+                _first_non_null(
+                    posterior_returns.get(ticker),
+                    raw.get("posterior_return_pct"),
+                    raw.get("bl_return_pct"),
+                    raw.get("BL Return %"),
+                    raw.get("Posterior Return %"),
+                )
+            ),
+            "market_weight": market_weight,
+            "bl_weight": bl_weight,
+            "weight_tilt": round(float(weight_tilt), 4),
+        })
+
+    return pd.DataFrame(normalized_rows)
+
+
 def _normalize_weight_vector(weight_dict, tickers):
     weights = pd.Series(weight_dict, dtype=float).reindex(tickers).fillna(0.0)
     total = float(weights.sum())
@@ -229,6 +376,22 @@ def _performance_metrics(growth_series):
         "max_drawdown": max_drawdown,
         "pnl_pct": pnl_pct,
     }
+
+
+def _asset_window_returns(price_frame):
+    if price_frame.empty or len(price_frame) < 2:
+        return {}
+    returns = (price_frame.iloc[-1] / price_frame.iloc[0] - 1.0) * 100.0
+    return {
+        ticker: round(float(value), 2)
+        for ticker, value in returns.items()
+    }
+
+
+def _window_return_percent(price_series):
+    if price_series is None or len(price_series) < 2:
+        return None
+    return round(float((price_series.iloc[-1] / price_series.iloc[0] - 1.0) * 100.0), 2)
 
 
 def _figure_has_data(fig):
@@ -347,7 +510,31 @@ def _fetch_sector_map(tickers):
     return sector_map
 
 
-def _fetch_report_allocation(tickers, risk_tolerance):
+def _response_error_message(response):
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {}
+    return payload.get("error") or f"Request returned {response.status_code}"
+
+
+def _request_bl_allocation(tickers):
+    try:
+        response = requests.post(
+            f"{API_URL}/bl-optimize/",
+            json={"tickers": tickers},
+            timeout=45,
+        )
+        if response.status_code != 200:
+            return None, _response_error_message(response)
+        return response.json(), None
+    except requests.Timeout:
+        return None, "The Black-Litterman allocation service timed out."
+    except Exception as exc:
+        return None, str(exc)
+
+
+def _request_risk_allocation(tickers, risk_tolerance):
     try:
         response = requests.post(
             f"{API_URL}/optimize/",
@@ -355,13 +542,28 @@ def _fetch_report_allocation(tickers, risk_tolerance):
             timeout=20,
         )
         if response.status_code != 200:
-            return None, f"Allocation request returned {response.status_code}"
-        data = response.json()
-        return data.get("allocation", {}), None
+            return None, _response_error_message(response)
+        return response.json(), None
     except requests.Timeout:
-        return None, "The allocation service timed out before it returned a risk-based portfolio."
+        return None, "The risk-based allocation service timed out."
     except Exception as exc:
         return None, str(exc)
+
+
+def _fetch_auto_allocation(tickers, risk_tolerance):
+    bl_result, bl_error = _request_bl_allocation(tickers)
+    if bl_result and bl_result.get("allocation"):
+        bl_result["method"] = "bl"
+        bl_result["bl_unavailable_reason"] = None
+        return bl_result, None
+
+    risk_result, risk_error = _request_risk_allocation(tickers, risk_tolerance)
+    if risk_result and risk_result.get("allocation"):
+        risk_result["method"] = "standard"
+        risk_result["bl_unavailable_reason"] = bl_error
+        return risk_result, None
+
+    return None, risk_error or bl_error or "Allocation services were unavailable."
 
 
 def _format_duration(seconds):
@@ -448,7 +650,8 @@ def _render_deep_report_progress(
 
 
 def _build_deep_report_context(
-    portfolio_dict,
+    input_tickers,
+    allocation_result,
     benchmark_ticker,
     train_start,
     train_end,
@@ -468,6 +671,20 @@ def _build_deep_report_context(
         if progress_callback:
             progress_callback(progress_value, stage_label, detail, eta_seconds)
 
+    requested_tickers = [str(t).upper() for t in input_tickers]
+    allocation_weights = allocation_result.get("allocation", allocation_result)
+    allocation_source = allocation_result.get("source", "risk_based")
+    allocation_blend_meta = allocation_result.get("blend_meta", {})
+    allocation_fallback_reason = (
+        allocation_result.get("fallback_reason")
+        or allocation_result.get("bl_unavailable_reason")
+    )
+    allocation_source_label = (
+        "AI-Driven Black-Litterman"
+        if allocation_source == "bl"
+        else "Risk-Based Fallback"
+    )
+
     test_start_dt = pd.to_datetime(train_end) + timedelta(days=1)
     test_end_dt = datetime.now() - timedelta(days=1)
     if test_start_dt >= test_end_dt:
@@ -481,8 +698,7 @@ def _build_deep_report_context(
 
     _emit_progress(0.28, "Preparing report inputs", "Loading report settings and risk-free rate.", 55)
     risk_free_rate = qr.opt_core.get_risk_free_rate()
-    tickers = list(portfolio_dict.keys())
-    all_tickers = list(dict.fromkeys(tickers + [benchmark_ticker]))
+    all_tickers = list(dict.fromkeys(requested_tickers + [benchmark_ticker]))
 
     _emit_progress(0.38, "Fetching full-period data", f"Downloading price history through {full_end_str}.", 45)
     data_full = get_data(all_tickers, train_start_str, full_end_str)
@@ -492,6 +708,22 @@ def _build_deep_report_context(
     data_test = get_data(all_tickers, test_start_str, test_end_str)
     if data_full is None or data_train is None or data_test is None:
         raise ValueError("Failed to fetch report data for one or more periods.")
+
+    report_universe = resolve_report_universe(
+        requested_tickers,
+        allocation_weights,
+        data_full,
+        data_train,
+        data_test,
+    )
+    tickers = report_universe["analysis_tickers"]
+    portfolio_dict = report_universe["allocation_weights"]
+    filtered_sector_map = {ticker: sector_map.get(ticker, "Other") for ticker in tickers}
+
+    if len(tickers) < 2:
+        raise ValueError(
+            "Need at least 2 requested tickers with shared history across the training and test windows."
+        )
 
     _emit_progress(0.68, "Calculating portfolio metrics", "Building cumulative returns, regression, and rolling metrics.", 19)
     portfolio_eval = (data_full[[benchmark_ticker]] / data_full[[benchmark_ticker]].iloc[0]).copy()
@@ -514,37 +746,57 @@ def _build_deep_report_context(
         benchmark_ticker,
         portfolio_dict,
         risk_free_rate,
-        sector_map,
+        filtered_sector_map,
         None,
         None,
-        sector_map,
+        filtered_sector_map,
     )
+
+    allocation_method = (
+        "AI-Driven Black-Litterman"
+        if allocation_source == "bl"
+        else (
+            f"{allocation_blend_meta.get('from', 'Inverse Vol')} -> "
+            f"{allocation_blend_meta.get('to', 'Max Sharpe')} "
+            f"(alpha {allocation_blend_meta.get('alpha', 0):.2f})"
+            if allocation_blend_meta
+            else "Continuous blend: inverse vol -> min vol -> max Sharpe"
+        )
+    )
+
+    allocation_metrics = {
+        "Risk Tolerance": f"{risk_tolerance:.2f}",
+        "Allocation Source": allocation_source_label,
+        "Allocation Method": allocation_method,
+        "Benchmark": benchmark_ticker,
+        "Report Universe": ", ".join(tickers),
+    }
+    if report_universe["dropped_tickers"]:
+        allocation_metrics["Unavailable Tickers"] = ", ".join(report_universe["dropped_tickers"])
+    if allocation_fallback_reason:
+        allocation_metrics["Fallback Reason"] = allocation_fallback_reason
 
     allocation_section = {
         "title": "Portfolio Construction",
         "description": (
-            f"Risk-based allocation generated at risk tolerance {risk_tolerance:.2f} "
+            f"{allocation_source_label} allocation for the requested report universe "
             f"using benchmark {benchmark_ticker}."
         ),
         "sidebar": [
             {
                 "title": "Allocation Inputs",
                 "type": "metrics",
-                "data": {
-                    "Risk Tolerance": f"{risk_tolerance:.2f}",
-                    "Allocation Method": "Continuous blend: inverse vol -> min vol -> max Sharpe",
-                    "Benchmark": benchmark_ticker,
-                },
+                "data": allocation_metrics,
             },
         ],
         "main_content": [
             {
-                "title": "Risk-Based Allocation Bar Chart",
+                "title": "Portfolio Allocation Bar Chart",
                 "type": "plot",
-                "data": _build_allocation_bar_figure(portfolio_dict, "Risk-Based Allocation"),
+                "data": _build_allocation_bar_figure(portfolio_dict, "Portfolio Allocation"),
             },
             {
-                "title": "Risk-Based Allocation Table",
+                "title": "Portfolio Allocation Table",
                 "type": "table_html",
                 "data": _allocation_table_html(portfolio_dict, "Weight"),
             },
@@ -607,7 +859,7 @@ def _build_deep_report_context(
     ]
 
     axis_title_overrides = {
-        "Risk-Based Allocation Bar Chart": ("Ticker", "Portfolio Weight"),
+        "Portfolio Allocation Bar Chart": ("Ticker", "Portfolio Weight"),
         "Portfolio Cumulative Returns": ("Date", "Growth of $1"),
         "Portfolio Alpha/Beta Regression": (benchmark_ticker, "Portfolio Return"),
         "Strategy Compositions (Asset)": (None, None),
@@ -648,6 +900,8 @@ def _build_deep_report_context(
         "html_content": html_content,
         "risk_free_rate": risk_free_rate,
         "sections": sections,
+        "allocation_result": allocation_result,
+        "report_universe": report_universe,
     }
 
 
@@ -692,6 +946,9 @@ def _render_deep_report_sections(report_context):
 
 def _render_allocation(result, tickers):
     method = result.get("method", "standard")
+    dropped_tickers = result.get("dropped_tickers", [])
+    if dropped_tickers:
+        st.caption(f"Ignored for allocation due to missing history: {', '.join(dropped_tickers)}")
 
     if method == "bl":
         # --- LSTM Views Table with animated spinners ---
@@ -836,6 +1093,13 @@ def _render_allocation(result, tickers):
                 f"Page will refresh automatically when ready."
             )
 
+        missing_views = result.get("missing_view_tickers", [])
+        if missing_views:
+            st.caption(
+                "No explicit BL view was generated for: "
+                f"{', '.join(missing_views)}. Those assets still remain in the covariance universe."
+            )
+
         st.divider()
         st.subheader("Recommended Allocation")
         _render_allocation_charts(result.get("allocation", {}))
@@ -843,10 +1107,22 @@ def _render_allocation(result, tickers):
 
     else:
         # Standard fallback
-        st.info("Using risk-based optimization (BL unavailable for these tickers).")
+        fallback_reason = result.get("bl_unavailable_reason")
+        if fallback_reason:
+            st.info(f"Using risk-based optimization because Black-Litterman was unavailable: {fallback_reason}")
+        else:
+            st.info("Using risk-based optimization.")
         st.subheader("Recommended Allocation")
         _render_allocation_charts(result.get("allocation", {}))
-        st.caption("Method: Risk-Based (HRP/CVaR/Sharpe)")
+        blend_meta = result.get("blend_meta", {})
+        if blend_meta:
+            st.caption(
+                "Method: Risk-Based "
+                f"({blend_meta.get('from', 'HRP')} -> {blend_meta.get('to', 'Max Sharpe')}, "
+                f"alpha={blend_meta.get('alpha', 0):.2f})"
+            )
+        else:
+            st.caption("Method: Risk-Based (inverse vol / min vol / max Sharpe)")
 
     # AI Reasoning
     reasoning = result.get("reasoning", "")
@@ -855,25 +1131,17 @@ def _render_allocation(result, tickers):
 
 def _run_allocation(tickers, risk_tolerance):
     """
-    Fast allocation via the standard risk-based optimizer.
-    BL with LSTM views is available in the dedicated Black-Litterman tab.
+    Automatic allocator:
+    1. Try AI-Driven Black-Litterman.
+    2. Fall back to the bounded risk-based optimizer when BL is unavailable.
     """
     with st.spinner("Generating allocation..."):
-        try:
-            std_resp = requests.post(
-                f"{API_URL}/optimize/",
-                json={"tickers": tickers, "risk_tolerance": risk_tolerance},
-                timeout=15
-            )
-            if std_resp.status_code == 200:
-                result = std_resp.json()
-                result["method"] = "standard"
-                st.session_state["allocation_result"] = result
-                _render_allocation(result, tickers)
-            else:
-                st.error(f"Optimization returned status {std_resp.status_code}")
-        except Exception as e:
-            st.error(f"Optimization failed: {e}")
+        result, error = _fetch_auto_allocation(tickers, risk_tolerance)
+        if result:
+            st.session_state["allocation_result"] = result
+            _render_allocation(result, tickers)
+        else:
+            st.error(f"Optimization failed: {error}")
 
 # Tabs
 tab_allocator, tab_bl, tab_report = st.tabs([
@@ -1157,11 +1425,19 @@ with tab_bl:
             st.markdown("### Results")
             benchmark_info = bl_res.get("benchmark", {})
             benchmark_label = benchmark_info.get("label", benchmark_info.get("ticker", "Benchmark"))
+            sample_window = bl_res.get("benchmark_window", {})
+            default_realized_window = bl_res.get("realized_window", {})
             st.caption(
                 f"Delta (risk aversion): {bl_res['delta']} | "
                 f"Tau: {bl_res['tau']} | "
                 f"Risk-free rate: {bl_res['risk_free_rate']}"
             )
+            if sample_window:
+                st.caption(
+                    f"Benchmark sample for beta and equilibrium returns: {benchmark_label} "
+                    f"from {sample_window.get('start')} to {sample_window.get('end')} "
+                    f"({sample_window.get('trading_days', 0)} trading days)."
+                )
 
             # --- Side-by-side bar chart: Eq weights vs BL weights ---
             st.subheader("Equilibrium vs BL Optimal Weights")
@@ -1191,46 +1467,23 @@ with tab_bl:
             )
             st.plotly_chart(fig_weights, use_container_width=True)
 
-            # --- Returns table ---
-            st.subheader("Return Comparison")
-            ret_table = bl_res["return_table"]
-            ret_df = pd.DataFrame(ret_table)
-            ret_df.columns = [
-                "Ticker",
-                f"Beta vs {benchmark_label}",
-                "Pi (Eq Return %)",
-                "BL Return %",
-                "Difference %",
-                "Optimal Weight",
-            ]
-            ret_df["Optimal Weight"] = ret_df["Optimal Weight"].apply(lambda x: f"{x:.2%}")
-
-            def _color_diff(val):
-                try:
-                    v = float(val)
-                    if v > 0:
-                        return "color: #4CAF50"
-                    elif v < 0:
-                        return "color: #f44336"
-                except (ValueError, TypeError):
-                    pass
-                return ""
-
-            st.dataframe(
-                ret_df.set_index("Ticker").style.applymap(
-                    _color_diff, subset=["Difference %"]
-                ),
-                use_container_width=True
-            )
-            st.caption(f"Beta is calculated from the same historical sample versus {benchmark_label}.")
-
             # --- Time period performance summary ---
             st.subheader("Time Period Performance")
             prices_df = _history_payload_to_frame(bl_res.get("price_history"))
+            benchmark_history_df = _history_payload_to_frame(bl_res.get("benchmark_history"))
             if not prices_df.empty:
                 min_history_date = prices_df.index.min().date()
                 max_history_date = prices_df.index.max().date()
-                default_from = max(min_history_date, max_history_date - timedelta(days=180))
+                default_from = (
+                    pd.to_datetime(default_realized_window["start"]).date()
+                    if default_realized_window.get("start")
+                    else max(min_history_date, max_history_date - timedelta(days=45))
+                )
+                default_to = (
+                    pd.to_datetime(default_realized_window["end"]).date()
+                    if default_realized_window.get("end")
+                    else max_history_date
+                )
 
                 perf_col1, perf_col2 = st.columns(2)
                 with perf_col1:
@@ -1244,7 +1497,7 @@ with tab_bl:
                 with perf_col2:
                     perf_to = st.date_input(
                         "To Date",
-                        value=max_history_date,
+                        value=default_to,
                         min_value=min_history_date,
                         max_value=max_history_date,
                         key="bl_perf_to",
@@ -1257,6 +1510,77 @@ with tab_bl:
                     if len(selected_prices) < 2:
                         st.warning("Selected range does not contain enough data points.")
                     else:
+                        window_label = f"{perf_from} to {perf_to}"
+                        benchmark_series = None
+                        if not benchmark_history_df.empty:
+                            selected_benchmark = benchmark_history_df.loc[str(perf_from):str(perf_to)]
+                            if len(selected_benchmark) >= 2:
+                                benchmark_series = selected_benchmark.iloc[:, 0]
+
+                        ret_df = _build_bl_return_frame(bl_res, tks)
+                        asset_window_returns = _asset_window_returns(selected_prices[tks])
+                        benchmark_return_pct = _window_return_percent(benchmark_series)
+                        ret_df["realized_return_pct"] = ret_df["ticker"].map(asset_window_returns)
+                        ret_df["benchmark_return_pct"] = benchmark_return_pct
+                        ret_df["excess_vs_benchmark_pct"] = ret_df["realized_return_pct"].apply(
+                            lambda val: (
+                                round(float(val - benchmark_return_pct), 2)
+                                if val is not None and benchmark_return_pct is not None
+                                else None
+                            )
+                        )
+                        ret_df = ret_df.rename(columns={
+                            "ticker": "Ticker",
+                            "beta_vs_benchmark": f"Beta vs {benchmark_label}",
+                            "equilibrium_return_pct": "Equilibrium Return %",
+                            "posterior_return_pct": "Posterior Return %",
+                            "market_weight": "Market Weight",
+                            "bl_weight": "BL Weight",
+                            "weight_tilt": "Weight Tilt",
+                            "realized_return_pct": f"Realized Return % ({window_label})",
+                            "benchmark_return_pct": f"{benchmark_label} Return % ({window_label})",
+                            "excess_vs_benchmark_pct": f"Excess vs {benchmark_label} % ({window_label})",
+                        })
+
+                        for column in ["Market Weight", "BL Weight", "Weight Tilt"]:
+                            if column in ret_df.columns:
+                                ret_df[column] = ret_df[column].map(_format_weight_fraction)
+
+                        def _color_signed(val):
+                            try:
+                                normalized = str(val).replace("%", "").strip()
+                                if not normalized:
+                                    return ""
+                                v = float(normalized)
+                                if v > 0:
+                                    return "color: #4CAF50"
+                                if v < 0:
+                                    return "color: #f44336"
+                            except (ValueError, TypeError):
+                                return ""
+                            return ""
+
+                        st.subheader("Expected vs Realized Comparison")
+                        styled_ret_df = ret_df.set_index("Ticker").style
+                        signed_subset = [
+                            column for column in [
+                                "Weight Tilt",
+                                f"Excess vs {benchmark_label} % ({window_label})",
+                            ]
+                            if column in ret_df.columns
+                        ]
+                        if signed_subset:
+                            styled_ret_df = styled_ret_df.applymap(
+                                _color_signed,
+                                subset=signed_subset,
+                            )
+                        st.dataframe(styled_ret_df, use_container_width=True)
+                        st.caption(
+                            f"Beta is estimated from the benchmark sample above versus {benchmark_label}. "
+                            f"Realized return columns use the selected window ({window_label}). "
+                            "Omega, shown below, is the view-uncertainty measure."
+                        )
+
                         equal_weight = {t: 1.0 / len(tks) for t in tks}
                         bl_growth = _portfolio_growth(selected_prices, bl_w)
                         eq_growth = _portfolio_growth(selected_prices, equal_weight)
@@ -1288,13 +1612,18 @@ with tab_bl:
                                 "Equal Weight": eq_growth,
                                 "Market Cap Weight": mcap_growth,
                             }).dropna()
+                            if benchmark_series is not None:
+                                comparison_df[benchmark_label] = benchmark_series / benchmark_series.iloc[0]
 
                             perf_fig = go.Figure()
                             for name, color in [
                                 ("BL Optimal", "#00CC96"),
                                 ("Equal Weight", "#636EFA"),
                                 ("Market Cap Weight", "#FFA15A"),
+                                (benchmark_label, "#FECB52"),
                             ]:
+                                if name not in comparison_df:
+                                    continue
                                 perf_fig.add_trace(go.Scatter(
                                     x=comparison_df.index,
                                     y=comparison_df[name],
@@ -1506,10 +1835,24 @@ with tab_report:
                         report_started_at,
                         eta_seconds=50,
                     )
-                    allocation, alloc_error = _fetch_report_allocation(r_tickers, report_risk_tolerance)
-                    if alloc_error or not allocation:
-                        allocation = {t: 1.0 / len(r_tickers) for t in r_tickers}
-                        st.info(f"Using equal-weight allocation (backend: {alloc_error or 'unavailable'}).")
+                    allocation_result, alloc_error = _fetch_auto_allocation(r_tickers, report_risk_tolerance)
+                    if alloc_error or not allocation_result:
+                        equal_weights = {t: 1.0 / len(r_tickers) for t in r_tickers}
+                        allocation_result = {
+                            "allocation": equal_weights,
+                            "source": "risk_based",
+                            "blend_meta": {},
+                            "fallback_reason": alloc_error or "Allocation service unavailable",
+                            "requested_tickers": r_tickers,
+                            "valid_tickers": r_tickers,
+                            "dropped_tickers": [],
+                            "method": "standard",
+                            "bl_unavailable_reason": alloc_error,
+                        }
+                        st.info(
+                            f"Using equal-weight allocation because automated allocation was unavailable: "
+                            f"{allocation_result['fallback_reason']}."
+                        )
                     if True:
                         report_file = os.path.join(
                             os.path.dirname(os.path.abspath(__file__)),
@@ -1528,7 +1871,8 @@ with tab_report:
                         sector_map = _fetch_sector_map(r_tickers)
                         try:
                             report_context = _build_deep_report_context(
-                                allocation,
+                                r_tickers,
+                                allocation_result,
                                 validated_benchmark,
                                 start_date,
                                 end_date,
@@ -1558,9 +1902,23 @@ with tab_report:
         if report_context:
             st.divider()
             st.subheader("Deep Report Dashboard")
-            st.caption(
-                f"Risk-free rate used in the report: {report_context['risk_free_rate']:.2%}"
+            allocation_result = report_context.get("allocation_result", {})
+            report_universe = report_context.get("report_universe", {})
+            allocation_source = allocation_result.get("source", "risk_based")
+            allocation_source_label = (
+                "AI-Driven Black-Litterman"
+                if allocation_source == "bl"
+                else "Risk-Based Fallback"
             )
+            st.caption(
+                f"Risk-free rate used in the report: {report_context['risk_free_rate']:.2%} | "
+                f"Allocation source: {allocation_source_label}"
+            )
+            if report_universe.get("dropped_tickers"):
+                st.caption(
+                    "Unavailable for the shared report universe: "
+                    f"{', '.join(report_universe['dropped_tickers'])}"
+                )
             st.download_button(
                 label="Download HTML Report",
                 data=report_context["html_content"],
