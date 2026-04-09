@@ -44,8 +44,8 @@ def build_views(tickers):
     """
     For each ticker:
     - Fetch current price
-    - Run _lstm_predict using evolved hyperparams if available
-    - Compute expected return = (predicted - current) / current
+    - Use evolved LSTM forecasts when available
+    - Fall back to historical mean return forecasts otherwise
     - Set confidence from directional_accuracy if evolved, else DEFAULT_CONFIDENCE
 
     Returns:
@@ -63,20 +63,24 @@ def build_views(tickers):
             hist = get_price_history(symbol, period="5d")
             if hist is None or hist.empty:
                 continue
-            current_price = float(hist["Close"].iloc[-1])
+            close_series = TrendPredictor._get_close_series(hist)
+            if close_series.empty:
+                continue
+            current_price = float(close_series.iloc[-1])
 
             # check for evolved hyperparams
             cached = OptimizedHyperparams.get_valid_cache(symbol)
 
             if cached:
-                predicted_price = TrendPredictor._lstm_predict(
+                forecast = TrendPredictor.forecast_price(
                     symbol,
                     hidden_size    = cached.hidden_size,
                     num_layers     = cached.num_layers,
                     learning_rate  = cached.learning_rate,
                     epochs         = cached.epochs,
                     dropout        = cached.dropout,
-                    seq_len        = cached.seq_len
+                    seq_len        = cached.seq_len,
+                    allow_lstm     = True,
                 )
                 # scale accuracy to confidence — clip to [MIN, MAX]
                 raw_conf   = cached.directional_accuracy / 100
@@ -84,23 +88,29 @@ def build_views(tickers):
                 model_source = "evolved"
                 accuracy     = cached.directional_accuracy
             else:
-                # No evolved model — queue GA immediately in background
+                # No evolved model — queue GA immediately in background if Redis is up.
                 try:
-                    from .tasks import run_ga_for_ticker
-                    run_ga_for_ticker.delay(symbol)
-                    queued = True
+                    from .tasks import queue_ga_for_ticker
+                    queued = queue_ga_for_ticker(symbol)
                 except Exception:
                     queued = False
 
-                predicted_price = TrendPredictor._lstm_predict(symbol)
+                forecast = TrendPredictor.forecast_price(symbol, allow_lstm=False)
                 confidence      = DEFAULT_CONFIDENCE
-                model_source    = "queued" if queued else "default"
+                model_source    = "queued" if queued else "historical"
                 accuracy        = None
 
-            if predicted_price is None:
+            if not forecast:
                 continue
 
-            expected_return = (predicted_price - current_price) / current_price
+            predicted_price = float(forecast["predicted_price"])
+            expected_return = float(forecast["expected_return"])
+            prediction_method = forecast.get("prediction_method", "historical_mean_fallback")
+            prediction_label = forecast.get("prediction_label", "Historical mean fallback")
+            if prediction_method != "lstm":
+                confidence = min(confidence, DEFAULT_CONFIDENCE)
+                if cached:
+                    model_source = "fallback"
 
             views[symbol]       = expected_return
             confidences[symbol] = confidence
@@ -112,7 +122,9 @@ def build_views(tickers):
                 "expected_return":  round(expected_return * 100, 2),
                 "confidence":       round(confidence * 100, 1),
                 "model_source":     model_source,  # "evolved", "queued", or "default"
-                "accuracy":         round(accuracy, 1) if accuracy else None
+                "accuracy":         round(accuracy, 1) if accuracy else None,
+                "prediction_method": prediction_method,
+                "prediction_label": prediction_label,
             })
 
         except Exception:
@@ -136,13 +148,16 @@ def run_black_litterman(tickers):
         bl_returns: {symbol: expected_return_%}
         error: str or None
     """
+    requested_tickers = [str(t).upper() for t in tickers]
     try:
         # --- Price data ---
         frames = {}
-        for t in tickers:
+        for t in requested_tickers:
             hist = get_price_history(t, period="2y")
             if hist is not None and not hist.empty:
-                frames[t] = hist["Close"]
+                close_series = TrendPredictor._get_close_series(hist)
+                if not close_series.empty:
+                    frames[t] = close_series
 
         if len(frames) < 2:
             return {"error": "Need at least 2 tickers with sufficient price history."}
@@ -158,13 +173,12 @@ def run_black_litterman(tickers):
         cov_matrix = risk_models.sample_cov(prices)
 
         # --- Market caps and prior returns ---
-        market_caps    = get_market_caps(valid_tickers)
-        market_weights = pd.Series(market_caps) / sum(market_caps.values())
-        market_weights = market_weights[valid_tickers]
+        market_caps = pd.Series(get_market_caps(valid_tickers)).reindex(valid_tickers).fillna(1.0)
+        market_weights = market_caps / market_caps.sum()
 
         delta       = 2.5  # market risk aversion — standard value
         prior       = market_implied_prior_returns(
-            market_weights, delta, cov_matrix
+            market_caps, delta, cov_matrix
         )
 
         # --- LSTM views ---
@@ -186,12 +200,12 @@ def run_black_litterman(tickers):
             omega_diag.append(max(omega_val, 1e-6))  # floor to avoid singularity
 
         # P matrix: one row per view, identity for absolute views
-        P = pd.DataFrame(0.0, index=view_symbols, columns=valid_tickers)
-        for sym in view_symbols:
-            if sym in P.columns:
-                P.loc[sym, sym] = 1.0
+        P = np.zeros((len(view_symbols), len(valid_tickers)))
+        for row_idx, sym in enumerate(view_symbols):
+            if sym in valid_tickers:
+                P[row_idx, valid_tickers.index(sym)] = 1.0
 
-        Q      = pd.Series(views)
+        Q = np.array([views[sym] for sym in view_symbols], dtype=float).reshape(-1, 1)
         omega  = np.diag(omega_diag)
 
         # --- Black-Litterman model ---
@@ -201,6 +215,7 @@ def run_black_litterman(tickers):
             P         = P,
             Q         = Q,
             omega     = omega,
+            tau       = 0.05,
             risk_aversion = delta
         )
 
@@ -212,14 +227,28 @@ def run_black_litterman(tickers):
         ef.max_sharpe(risk_free_rate=0.05)
         weights = ef.clean_weights()
 
-        allocation = {k: round(float(v), 4) for k, v in weights.items() if float(v) > 0.001}
+        allocation = {
+            ticker: round(float(weights.get(ticker, 0.0)), 4)
+            for ticker in valid_tickers
+        }
 
-        bl_returns_pct = {k: round(float(v) * 100, 2) for k, v in bl_returns.items()}
+        bl_returns_pct = {
+            ticker: round(float(bl_returns.get(ticker, 0.0)) * 100, 2)
+            for ticker in valid_tickers
+        }
+        missing_view_tickers = [ticker for ticker in valid_tickers if ticker not in views]
 
         return {
             "allocation":   allocation,
             "view_details": view_details,
             "bl_returns":   bl_returns_pct,
+            "requested_tickers": requested_tickers,
+            "valid_tickers": valid_tickers,
+            "dropped_tickers": [ticker for ticker in requested_tickers if ticker not in valid_tickers],
+            "view_tickers": view_symbols,
+            "missing_view_tickers": missing_view_tickers,
+            "source": "bl",
+            "fallback_reason": None,
             "error":        None
         }
 

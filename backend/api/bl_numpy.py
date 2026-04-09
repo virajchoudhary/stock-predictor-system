@@ -14,8 +14,21 @@ Implements:
 
 import numpy as np
 import pandas as pd
+from pathlib import Path
 import yfinance as yf
 from sklearn.covariance import LedoitWolf
+
+try:
+    _YF_CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache" / "yfinance"
+    _YF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    yf.set_tz_cache_location(str(_YF_CACHE_DIR))
+except Exception:
+    pass
+
+BENCHMARK_LABELS = {
+    "^GSPC": "S&P 500",
+    "^NSEI": "Nifty 50",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +72,94 @@ def fetch_market_caps(tickers):
         if t not in caps:
             caps[t] = avg
     return caps
+
+
+def select_market_benchmark(tickers):
+    indian_count = sum(
+        1 for t in tickers
+        if t.upper().endswith(".NS") or t.upper().endswith(".BO")
+    )
+    if indian_count >= max(1, len(tickers) / 2):
+        return "^NSEI"
+    return "^GSPC"
+
+
+def fetch_benchmark_prices(benchmark_ticker, years=2):
+    try:
+        hist = yf.download(benchmark_ticker, period=f"{years}y", progress=False)
+        if hist is None or hist.empty:
+            return None
+        close = hist["Close"]
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0]
+        benchmark_prices = close.dropna()
+        return benchmark_prices if len(benchmark_prices) > 60 else None
+    except Exception:
+        return None
+
+
+def compute_asset_betas(prices, benchmark_prices):
+    asset_returns = prices.pct_change().dropna()
+    benchmark_returns = benchmark_prices.pct_change().dropna()
+    benchmark_returns.name = "benchmark"
+
+    aligned = asset_returns.join(benchmark_returns, how="inner").dropna()
+    if aligned.empty:
+        return {t: 0.0 for t in prices.columns}
+
+    benchmark_var = float(aligned["benchmark"].var())
+    if benchmark_var <= 1e-12:
+        return {t: 0.0 for t in prices.columns}
+
+    betas = {}
+    for ticker in prices.columns:
+        cov = float(aligned[[ticker, "benchmark"]].cov().iloc[0, 1])
+        betas[ticker] = cov / benchmark_var
+    return betas
+
+
+def serialize_history(price_frame):
+    return {
+        "dates": [idx.strftime("%Y-%m-%d") for idx in price_frame.index],
+        "series": {
+            col: [round(float(v), 6) for v in price_frame[col].tolist()]
+            for col in price_frame.columns
+        },
+    }
+
+
+def compute_realized_window_returns(prices, benchmark_prices=None, trading_days=30):
+    if prices is None or len(prices) < 2:
+        return None
+
+    window_days = int(max(1, min(trading_days, len(prices) - 1)))
+    window_prices = prices.iloc[-(window_days + 1):]
+
+    asset_returns = (
+        (window_prices.iloc[-1] / window_prices.iloc[0] - 1.0) * 100.0
+    ).to_dict()
+    benchmark_return_pct = None
+
+    if benchmark_prices is not None and len(benchmark_prices) >= len(window_prices):
+        benchmark_window = benchmark_prices.reindex(window_prices.index).dropna()
+        if len(benchmark_window) >= 2:
+            benchmark_return_pct = float(
+                (benchmark_window.iloc[-1] / benchmark_window.iloc[0] - 1.0) * 100.0
+            )
+
+    return {
+        "trading_days": window_days,
+        "start": window_prices.index[0].strftime("%Y-%m-%d"),
+        "end": window_prices.index[-1].strftime("%Y-%m-%d"),
+        "asset_returns_pct": {
+            ticker: round(float(value), 2)
+            for ticker, value in asset_returns.items()
+        },
+        "benchmark_return_pct": (
+            round(float(benchmark_return_pct), 2)
+            if benchmark_return_pct is not None else None
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -203,11 +304,12 @@ def _idzorek_omega_element(k, P, Q, tau, Sigma, Pi, w_mkt, confidence_pct):
             w_k = w_k / np.sum(np.abs(w_k))
 
         actual_tilt = w_k - w_mkt
-        # Compare norm of actual tilt vs target tilt
+        # Compare norm of actual tilt vs target tilt. Higher omega means less
+        # confidence, so the posterior tilt shrinks as omega increases.
         if np.linalg.norm(actual_tilt) > np.linalg.norm(target_tilt):
-            hi = mid  # omega too small (too confident), increase
+            lo = mid  # omega too small (too confident), increase it
         else:
-            lo = mid  # omega too large (not confident enough), decrease
+            hi = mid  # omega too large (not confident enough), decrease it
 
     omega_k_val = (lo + hi) / 2.0
     return max(omega_k_val, 1e-10)
@@ -258,13 +360,11 @@ def bl_posterior(tau, Sigma, Pi, P, Q, Omega):
 def compute_view_portfolios(P, Q, tau, Sigma, Omega, Pi, w_mkt, tickers):
     """
     For each view k, compute:
-    - The view portfolio weight vector
-    - Lambda (weight/contribution of this view in the final portfolio)
+    - The normalized view portfolio exposure vector
+    - Lambda, a raw view-strength coefficient rather than a bounded weight
     """
     K = P.shape[0]
     N = len(tickers)
-    tau_Sigma_inv = np.linalg.inv(tau * Sigma)
-    Omega_inv = np.linalg.inv(Omega)
 
     decomposition = []
     for k in range(K):
@@ -326,9 +426,27 @@ def run_bl_analysis(tickers, market_weights, views, tau=0.05, risk_free_rate=0.0
     if N < 2:
         return {"error": "Need at least 2 tickers with sufficient price history."}
 
+    benchmark_ticker = select_market_benchmark(valid_tickers)
+    benchmark_prices = fetch_benchmark_prices(benchmark_ticker)
+    if benchmark_prices is not None:
+        aligned_prices = prices.join(benchmark_prices.rename(benchmark_ticker), how="inner").dropna()
+        if len(aligned_prices) > 60:
+            prices = aligned_prices[valid_tickers]
+            benchmark_prices = aligned_prices[benchmark_ticker]
+        else:
+            benchmark_prices = None
+
     # 2. Covariance matrix (Ledoit-Wolf)
     Sigma_df, returns = compute_covariance(prices)
     Sigma = Sigma_df.values
+    betas = compute_asset_betas(prices, benchmark_prices) if benchmark_prices is not None else {
+        t: 0.0 for t in valid_tickers
+    }
+    sample_window = {
+        "start": prices.index.min().strftime("%Y-%m-%d"),
+        "end": prices.index.max().strftime("%Y-%m-%d"),
+        "trading_days": max(len(prices) - 1, 0),
+    }
 
     # 3. Market weights vector
     w_mkt = np.array([market_weights.get(t, 1.0 / N) for t in valid_tickers])
@@ -430,14 +548,36 @@ def run_bl_analysis(tickers, market_weights, views, tau=0.05, risk_free_rate=0.0
     mkt_sharpe = round((mkt_ret - risk_free_rate) / mkt_vol, 3) if mkt_vol > 1e-10 else 0.0
 
     # 15. Build return table
+    default_realized_window = compute_realized_window_returns(
+        prices,
+        benchmark_prices=benchmark_prices,
+        trading_days=30,
+    )
     return_table = []
     for i, t in enumerate(valid_tickers):
+        realized_return_pct = None
+        excess_vs_benchmark_pct = None
+        benchmark_return_pct = None
+        if default_realized_window is not None:
+            realized_return_pct = default_realized_window["asset_returns_pct"].get(t)
+            benchmark_return_pct = default_realized_window.get("benchmark_return_pct")
+            if realized_return_pct is not None and benchmark_return_pct is not None:
+                excess_vs_benchmark_pct = round(
+                    float(realized_return_pct - benchmark_return_pct),
+                    2,
+                )
+
         return_table.append({
             "ticker": t,
-            "pi": round(float(Pi[i]) * 100, 2),
-            "bl_return": round(float(E[i]) * 100, 2),
-            "difference": round(float((E[i] - Pi[i])) * 100, 2),
-            "optimal_weight": bl_weights.get(t, 0.0),
+            "beta_vs_benchmark": round(float(betas.get(t, 0.0)), 3),
+            "equilibrium_return_pct": round(float(Pi[i]) * 100, 2),
+            "posterior_return_pct": round(float(E[i]) * 100, 2),
+            "market_weight": eq_weights.get(t, 0.0),
+            "bl_weight": bl_weights.get(t, 0.0),
+            "weight_tilt": round(float(bl_weights.get(t, 0.0) - eq_weights.get(t, 0.0)), 4),
+            "realized_return_pct": realized_return_pct,
+            "benchmark_return_pct": benchmark_return_pct,
+            "excess_vs_benchmark_pct": excess_vs_benchmark_pct,
         })
 
     return {
@@ -445,6 +585,18 @@ def run_bl_analysis(tickers, market_weights, views, tau=0.05, risk_free_rate=0.0
         "bl_weights": bl_weights,
         "posterior_returns": {valid_tickers[i]: round(float(E[i]) * 100, 2) for i in range(N)},
         "equilibrium_returns": {valid_tickers[i]: round(float(Pi[i]) * 100, 2) for i in range(N)},
+        "betas": {t: round(float(betas.get(t, 0.0)), 3) for t in valid_tickers},
+        "benchmark": {
+            "ticker": benchmark_ticker,
+            "label": BENCHMARK_LABELS.get(benchmark_ticker, benchmark_ticker),
+        },
+        "benchmark_window": sample_window,
+        "realized_window": default_realized_window,
+        "price_history": serialize_history(prices),
+        "benchmark_history": (
+            serialize_history(benchmark_prices.to_frame(name=benchmark_ticker))
+            if benchmark_prices is not None else None
+        ),
         "return_table": return_table,
         "view_decomposition": view_decomp,
         "implied_views": implied_views_list,

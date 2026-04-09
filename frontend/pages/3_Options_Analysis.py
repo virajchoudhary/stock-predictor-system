@@ -6,6 +6,20 @@ import yfinance as yf
 from scipy.optimize import minimize
 from datetime import datetime, timedelta
 import requests
+import time
+import uuid
+import os
+import sys
+
+_FRONTEND_ROOT = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+)
+if _FRONTEND_ROOT not in sys.path:
+    sys.path.insert(0, _FRONTEND_ROOT)
+
+from components.black_scholes_ui import render_black_scholes_analyzer
+
+API_URL = "http://127.0.0.1:8000/api"
 
 # ---------------------------------------------------------------------------
 # NSE Live Data — jugaad-data (replaces nsepython scraper)
@@ -201,8 +215,9 @@ def calibrate_sabr(strikes, market_ivs, f, t):
 # Layout
 # ---------------------------------------------------------------------------
 
-tab_mispricing, tab_bs, tab_surface = st.tabs([
+tab_mispricing, tab_rl_blend, tab_bs, tab_surface = st.tabs([
     "Mispricing (SABR)",
+    "RL Ensemble Blend",
     "Black-Scholes",
     "Volatility Surface",
 ])
@@ -339,210 +354,213 @@ with tab_mispricing:
             )
 
 # ---------------------------------------------------------------------------
-# TAB 2 — Black-Scholes
+# TAB 2 — RL Ensemble Blend (A2C · SAC · TD3)
+# ---------------------------------------------------------------------------
+with tab_rl_blend:
+    st.markdown("### RL Ensemble Portfolio Blend")
+    st.caption("Train A2C · SAC · TD3 agents on your option underlyings and blend their allocations into a final weight.")
+
+    SPEED_MAP = {"Fast (5k)": 5000, "Medium (20k)": 20000, "Thorough (50k)": 50000}
+    COLORS    = ["#00D4FF", "#00FF94", "#FFB800", "#FF4466", "#BF7FFF", "#FF8C00"]
+
+    def _donut(alloc, centre):
+        fig = go.Figure(data=[go.Pie(
+            labels=list(alloc.keys()), values=list(alloc.values()), hole=0.55,
+            marker=dict(colors=COLORS[:len(alloc)], line=dict(color="#080C10", width=2)),
+            textfont=dict(size=11),
+        )])
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(t=10, b=10, l=10, r=10),
+            annotations=[dict(text=centre, x=0.5, y=0.5, font_size=14, showarrow=False)],
+        )
+        return fig
+
+    LABELS = {
+        "fetching_data":          "Fetching 2 years of price data...",
+        "fetching_fundamentals":  "Scoring fundamentals & news sentiment...",
+        "hpo_running":            "Running GA hyperparameter optimisation...",
+        "hpo_complete":           "HPO complete — evolved hyperparameters ready.",
+        "hpo_loaded_from_cache":  "HPO loaded from cache.",
+        "hpo_skipped":            "HPO skipped — using defaults.",
+        "training_A2C":           "[1/3] Training A2C...",
+        "training_SAC":           "[2/3] Training SAC...",
+        "training_TD3":           "[3/3] Training TD3...",
+        "evaluating":             "Computing ensemble allocation...",
+        "complete":               "Done.",
+    }
+
+    # ── Inputs ────────────────────────────────────────────────────────────────
+    col_t, col_c = st.columns([3, 2])
+    with col_t:
+        rl_tickers_input = st.text_area("UNDERLYING TICKERS", "AAPL, MSFT, GOOG", height=70,
+                                        key="rl_opt_tickers")
+    with col_c:
+        rl_speed   = st.selectbox("RL TRAINING SPEED", list(SPEED_MAP.keys()), index=0, key="rl_opt_speed")
+        rl_ts      = SPEED_MAP[rl_speed]
+        hpo_eligible = rl_ts >= 10000
+        use_hpo    = st.toggle("🧬 Evolve Hyperparameters (GA HPO)", value=True,
+                               disabled=not hpo_eligible,
+                               help="Genetic Algorithm evolves optimal hyperparameters. Requires Medium or Thorough speed.",
+                               key="rl_opt_hpo")
+        if not hpo_eligible:
+            st.caption("⚠ HPO requires Medium/Thorough speed.")
+        elif use_hpo:
+            st.caption("✔ GA will evolve hyperparameters for A2C · SAC · TD3.")
+        else:
+            st.caption("— Default hyperparameters will be used.")
+
+    rl_blend = st.slider("QUANT ← BLEND → RL ENSEMBLE", 0.0, 1.0, 0.5, step=0.05, key="rl_opt_blend")
+    quant_pct = round((1 - rl_blend) * 100)
+    rl_pct    = round(rl_blend * 100)
+    st.caption(f"{quant_pct}% Quant (Min-Vol)  +  {rl_pct}% RL Ensemble (A2C · SAC · TD3)")
+
+    for k, v in [("rl_alloc_quant", None), ("rl_alloc_rl", None),
+                 ("rl_alloc_blend", None), ("rl_session", str(uuid.uuid4())[:8])]:
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    run_rl = st.button("▶  TRAIN & BLEND", type="primary", key="rl_opt_run")
+
+    if run_rl:
+        tickers = [t.strip() for t in rl_tickers_input.split(",") if t.strip()]
+        if len(tickers) < 2:
+            st.warning("Enter at least 2 tickers.")
+        else:
+            st.session_state.rl_alloc_quant = None
+            st.session_state.rl_alloc_rl    = None
+            st.session_state.rl_alloc_blend = None
+            st.session_state.rl_session     = str(uuid.uuid4())[:8]
+
+            # Step 1 — Quant (min-vol via optimize endpoint)
+            with st.spinner("Step 1 — Running Quant optimisation..."):
+                try:
+                    resp = requests.post(f"{API_URL}/optimize/",
+                                         json={"tickers": tickers, "risk_tolerance": 0.3},
+                                         timeout=30)
+                    if resp.status_code == 200:
+                        q_raw = resp.json().get("allocation", {})
+                        st.session_state.rl_alloc_quant = q_raw
+                    else:
+                        st.warning("Quant step failed — RL-only blend will be used.")
+                except Exception as e:
+                    st.warning(f"Quant error: {e}")
+
+            # Step 2 — RL Ensemble (async train + poll)
+            if rl_blend > 0:
+                st.markdown("**Step 2 — Training RL Ensemble (A2C · SAC · TD3)**")
+                pb   = st.progress(0)
+                stxt = st.empty()
+                try:
+                    kick = requests.post(f"{API_URL}/rl/train/", json={
+                        "tickers":    tickers,
+                        "timesteps":  rl_ts,
+                        "session_id": st.session_state.rl_session,
+                        "use_hpo":    use_hpo,
+                    }, timeout=10)
+                    if kick.status_code == 200:
+                        for _ in range(600):
+                            try:
+                                prog = requests.get(
+                                    f"{API_URL}/rl/progress/{st.session_state.rl_session}/",
+                                    timeout=5).json()
+                                pct    = prog.get("progress", 0)
+                                status = prog.get("status", "")
+                                pb.progress(int(min(pct, 100)))
+                                stxt.caption(f"▸ {LABELS.get(status, status)}  {pct:.0f}%")
+                                if status == "error":
+                                    st.error(prog.get("error", "Unknown error"))
+                                    break
+                                if status == "complete":
+                                    st.session_state.rl_alloc_rl = prog.get("allocation", {})
+                                    break
+                            except Exception:
+                                pass
+                            time.sleep(2)
+                    else:
+                        st.warning("RL training failed to start.")
+                except Exception as e:
+                    st.warning(f"RL error: {e}")
+
+            # Blend quant + RL
+            q = st.session_state.rl_alloc_quant or {}
+            r = st.session_state.rl_alloc_rl    or {}
+            if q or r:
+                if q and r:
+                    all_t  = set(q) | set(r)
+                    blended = {t: (1 - rl_blend) * q.get(t, 0.0) + rl_blend * r.get(t, 0.0) for t in all_t}
+                    total  = sum(blended.values())
+                    blended = {t: round(v / total, 4) for t, v in blended.items() if v > 0.001}
+                else:
+                    blended = q or r
+                st.session_state.rl_alloc_blend = blended
+            st.rerun()
+
+    # ── Results ───────────────────────────────────────────────────────────────
+    if st.session_state.rl_alloc_blend:
+        q     = st.session_state.rl_alloc_quant or {}
+        r     = st.session_state.rl_alloc_rl    or {}
+        blend = st.session_state.rl_alloc_blend
+
+        st.success("▸ BLENDED ALLOCATION READY")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.caption(f"Quant (Min-Vol) — {quant_pct}%")
+            if q: st.plotly_chart(_donut(q, "Quant"), use_container_width=True)
+        with c2:
+            st.caption(f"RL Ensemble — {rl_pct}%")
+            if r:
+                st.plotly_chart(_donut(r, "ENS"), use_container_width=True)
+            else:
+                st.info("Blend set to 0% — RL not trained")
+        with c3:
+            st.caption(f"Final Blend — {quant_pct}% + {rl_pct}%")
+            st.plotly_chart(_donut(blend, "MIX"), use_container_width=True)
+
+        # Comparison table
+        all_t = sorted(set(list(q.keys()) + list(r.keys()) + list(blend.keys())))
+        rows  = []
+        for t in all_t:
+            qw = q.get(t, 0.0); rw = r.get(t, 0.0); bw = blend.get(t, 0.0)
+            rows.append({
+                "Ticker":       t,
+                "Quant (Min-Vol)": f"{qw:.1%}" if qw > 0 else "—",
+                "RL Ensemble":  f"{rw:.1%}" if rw > 0 else "—",
+                "Final Blend":  f"{bw:.1%}" if bw > 0 else "—",
+                "Δ RL vs Quant": (f"+{bw-qw:.1%}" if bw-qw >= 0 else f"{bw-qw:.1%}") if qw > 0 else "new",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # Agent metrics
+        prog_data = {}
+        try:
+            prog_data = requests.get(
+                f"{API_URL}/rl/progress/{st.session_state.rl_session}/", timeout=3).json()
+        except Exception:
+            pass
+        if prog_data.get("agent_metrics"):
+            st.markdown("**Agent Performance**")
+            m_rows = []
+            for agent, m in prog_data["agent_metrics"].items():
+                m_rows.append({
+                    "Agent":        agent,
+                    "Final Value":  f"${m['final_value']:,.0f}",
+                    "Return":       f"{m['total_return']:+.1f}%",
+                    "Sharpe":       f"{m['sharpe']:.3f}",
+                    "Sortino":      f"{m['sortino']:.3f}",
+                    "Max Drawdown": f"{m['max_drawdown']:.2%}",
+                })
+            st.dataframe(pd.DataFrame(m_rows), use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# TAB 3 — Black-Scholes
 # ---------------------------------------------------------------------------
 with tab_bs:
-    from scipy.stats import norm as sp_norm
-
-    def bs_price(S, K, T, r, sigma, option_type="call"):
-        """Black-Scholes option price."""
-        if T <= 0 or sigma <= 0:
-            intrinsic = max(S - K, 0) if option_type == "call" else max(K - S, 0)
-            return intrinsic
-        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
-        if option_type == "call":
-            return S * sp_norm.cdf(d1) - K * np.exp(-r * T) * sp_norm.cdf(d2)
-        else:
-            return K * np.exp(-r * T) * sp_norm.cdf(-d2) - S * sp_norm.cdf(-d1)
-
-    def bs_greeks(S, K, T, r, sigma, option_type="call"):
-        """Compute all Greeks."""
-        if T <= 0 or sigma <= 0:
-            return {"delta": 0, "gamma": 0, "theta": 0, "vega": 0, "rho": 0}
-        d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
-        pdf_d1 = sp_norm.pdf(d1)
-
-        gamma = pdf_d1 / (S * sigma * np.sqrt(T))
-        vega = S * pdf_d1 * np.sqrt(T) / 100  # per 1% move
-
-        if option_type == "call":
-            delta = sp_norm.cdf(d1)
-            theta = (-(S * pdf_d1 * sigma) / (2 * np.sqrt(T))
-                     - r * K * np.exp(-r * T) * sp_norm.cdf(d2)) / 365
-            rho = K * T * np.exp(-r * T) * sp_norm.cdf(d2) / 100
-        else:
-            delta = sp_norm.cdf(d1) - 1
-            theta = (-(S * pdf_d1 * sigma) / (2 * np.sqrt(T))
-                     + r * K * np.exp(-r * T) * sp_norm.cdf(-d2)) / 365
-            rho = -K * T * np.exp(-r * T) * sp_norm.cdf(-d2) / 100
-
-        return {"delta": delta, "gamma": gamma, "theta": theta, "vega": vega, "rho": rho}
-
-    def bs_implied_vol(market_price, S, K, T, r, option_type="call"):
-        """Newton's method for implied volatility."""
-        sigma = 0.2
-        for _ in range(100):
-            price = bs_price(S, K, T, r, sigma, option_type)
-            d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-            vega_raw = S * sp_norm.pdf(d1) * np.sqrt(T)
-            if vega_raw < 1e-10:
-                break
-            sigma = sigma - (price - market_price) / vega_raw
-            sigma = max(sigma, 0.001)
-        return sigma
-
-    st.subheader("Black-Scholes Option Pricer")
-
-    # Inputs
-    bs_col1, bs_col2 = st.columns(2)
-    with bs_col1:
-        bs_S = st.number_input("Spot Price (S)", 1.0, 100000.0, 100.0, 1.0, key="bs_S")
-        bs_K = st.number_input("Strike Price (K)", 1.0, 100000.0, 100.0, 1.0, key="bs_K")
-        bs_T = st.number_input("Time to Expiry (years)", 0.01, 10.0, 1.0, 0.01, key="bs_T")
-    with bs_col2:
-        bs_r = st.number_input("Risk-Free Rate", 0.0, 0.30, 0.05, 0.005, key="bs_r")
-        bs_sigma = st.number_input("Volatility (sigma)", 0.01, 3.0, 0.20, 0.01, key="bs_sigma")
-        bs_type = st.selectbox("Option Type", ["call", "put"], key="bs_type")
-
-    # Price and Greeks
-    price_call = bs_price(bs_S, bs_K, bs_T, bs_r, bs_sigma, "call")
-    price_put = bs_price(bs_S, bs_K, bs_T, bs_r, bs_sigma, "put")
-    greeks = bs_greeks(bs_S, bs_K, bs_T, bs_r, bs_sigma, bs_type)
-
-    st.divider()
-
-    # Metrics row
-    mc1, mc2, mc3, mc4 = st.columns(4)
-    with mc1:
-        st.metric("Call Price", f"${price_call:.4f}")
-    with mc2:
-        st.metric("Put Price", f"${price_put:.4f}")
-    with mc3:
-        st.metric("Put-Call Parity Check",
-                   f"${price_call - price_put:.4f}",
-                   delta=f"S - K*e^(-rT) = ${bs_S - bs_K * np.exp(-bs_r * bs_T):.4f}")
-    with mc4:
-        st.metric("Intrinsic Value",
-                   f"${max(bs_S - bs_K, 0) if bs_type == 'call' else max(bs_K - bs_S, 0):.4f}")
-
-    # Greeks
-    st.subheader("Greeks")
-    gc1, gc2, gc3, gc4, gc5 = st.columns(5)
-    with gc1:
-        st.metric("Delta (Δ)", f"{greeks['delta']:.4f}")
-    with gc2:
-        st.metric("Gamma (Γ)", f"{greeks['gamma']:.6f}")
-    with gc3:
-        st.metric("Theta (Θ)", f"{greeks['theta']:.4f}")
-    with gc4:
-        st.metric("Vega (ν)", f"{greeks['vega']:.4f}")
-    with gc5:
-        st.metric("Rho (ρ)", f"{greeks['rho']:.4f}")
-
-    st.divider()
-
-    # --- Charts ---
-    st.subheader("Payoff & Sensitivity Charts")
-    chart_tab1, chart_tab2, chart_tab3 = st.tabs(["Payoff Diagram", "Greeks vs Spot", "Price Heatmap"])
-
-    with chart_tab1:
-        spot_range = np.linspace(bs_K * 0.5, bs_K * 1.5, 200)
-        payoff_call = np.maximum(spot_range - bs_K, 0) - price_call
-        payoff_put = np.maximum(bs_K - spot_range, 0) - price_put
-        price_curve = np.array([
-            bs_price(s, bs_K, bs_T, bs_r, bs_sigma, bs_type) for s in spot_range
-        ])
-        intrinsic = np.maximum(spot_range - bs_K, 0) if bs_type == "call" else np.maximum(bs_K - spot_range, 0)
-
-        fig_payoff = go.Figure()
-        fig_payoff.add_trace(go.Scatter(
-            x=spot_range, y=price_curve,
-            mode="lines", name=f"BS {bs_type.title()} Price",
-            line=dict(color="#00CC96", width=2),
-        ))
-        fig_payoff.add_trace(go.Scatter(
-            x=spot_range, y=intrinsic,
-            mode="lines", name="Intrinsic Value",
-            line=dict(color="#636EFA", dash="dash"),
-        ))
-        fig_payoff.add_trace(go.Scatter(
-            x=spot_range,
-            y=payoff_call if bs_type == "call" else payoff_put,
-            mode="lines", name="P&L at Expiry",
-            line=dict(color="#EF553B", width=1.5),
-        ))
-        fig_payoff.add_hline(y=0, line_dash="dot", line_color="gray")
-        fig_payoff.add_vline(x=bs_K, line_dash="dot", line_color="gray",
-                             annotation_text="Strike")
-        fig_payoff.update_layout(
-            xaxis_title="Spot Price",
-            yaxis_title="Value ($)",
-            margin=dict(t=20, b=30),
-        )
-        st.plotly_chart(fig_payoff, use_container_width=True)
-
-    with chart_tab2:
-        spot_g = np.linspace(bs_K * 0.5, bs_K * 1.5, 200)
-        deltas = [bs_greeks(s, bs_K, bs_T, bs_r, bs_sigma, bs_type)["delta"] for s in spot_g]
-        gammas = [bs_greeks(s, bs_K, bs_T, bs_r, bs_sigma, bs_type)["gamma"] for s in spot_g]
-        thetas = [bs_greeks(s, bs_K, bs_T, bs_r, bs_sigma, bs_type)["theta"] for s in spot_g]
-        vegas = [bs_greeks(s, bs_K, bs_T, bs_r, bs_sigma, bs_type)["vega"] for s in spot_g]
-
-        from plotly.subplots import make_subplots
-        fig_greeks = make_subplots(rows=2, cols=2,
-                                   subplot_titles=["Delta", "Gamma", "Theta", "Vega"])
-        fig_greeks.add_trace(go.Scatter(x=spot_g, y=deltas, line=dict(color="#636EFA")), row=1, col=1)
-        fig_greeks.add_trace(go.Scatter(x=spot_g, y=gammas, line=dict(color="#00CC96")), row=1, col=2)
-        fig_greeks.add_trace(go.Scatter(x=spot_g, y=thetas, line=dict(color="#EF553B")), row=2, col=1)
-        fig_greeks.add_trace(go.Scatter(x=spot_g, y=vegas, line=dict(color="#AB63FA")), row=2, col=2)
-        fig_greeks.update_layout(
-            showlegend=False,
-            margin=dict(t=40, b=30),
-            height=500,
-        )
-        for i in range(1, 5):
-            fig_greeks.update_xaxes(title_text="Spot Price", row=(i-1)//2+1, col=(i-1)%2+1)
-        st.plotly_chart(fig_greeks, use_container_width=True)
-
-    with chart_tab3:
-        st.caption("Option price as a function of Spot Price and Volatility.")
-        spot_hm = np.linspace(bs_K * 0.7, bs_K * 1.3, 30)
-        vol_hm = np.linspace(0.05, 0.80, 25)
-        price_grid = np.array([
-            [bs_price(s, bs_K, bs_T, bs_r, v, bs_type) for s in spot_hm]
-            for v in vol_hm
-        ])
-        fig_hm = go.Figure(data=go.Heatmap(
-            z=price_grid,
-            x=np.round(spot_hm, 1),
-            y=np.round(vol_hm, 2),
-            colorscale="Viridis",
-            colorbar_title="Price ($)",
-        ))
-        fig_hm.update_layout(
-            xaxis_title="Spot Price",
-            yaxis_title="Volatility",
-            margin=dict(t=20, b=30),
-        )
-        st.plotly_chart(fig_hm, use_container_width=True)
-
-    # --- Implied Volatility Calculator ---
-    st.divider()
-    st.subheader("Implied Volatility Calculator")
-    iv_col1, iv_col2 = st.columns([2, 1])
-    with iv_col1:
-        bs_market_price = st.number_input(
-            "Market Option Price", 0.01, 100000.0, 10.0, 0.01, key="bs_mkt_price"
-        )
-    with iv_col2:
-        if st.button("Calculate IV", key="bs_calc_iv"):
-            iv = bs_implied_vol(bs_market_price, bs_S, bs_K, bs_T, bs_r, bs_type)
-            st.metric("Implied Volatility", f"{iv:.4f} ({iv*100:.2f}%)")
+    render_black_scholes_analyzer()
 
 # ---------------------------------------------------------------------------
-# TAB 3 — Volatility Surface
+# TAB 4 — Volatility Surface
 # ---------------------------------------------------------------------------
 with tab_surface:
     st.subheader("3D Implied Volatility Surface")
