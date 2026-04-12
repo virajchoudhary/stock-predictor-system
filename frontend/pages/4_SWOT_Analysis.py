@@ -260,6 +260,8 @@ st.divider()
 # with the already-instantiated text_input widget key.
 if "swot_prefill" not in st.session_state:
     st.session_state["swot_prefill"] = ""
+if "swot_auto_run" not in st.session_state:
+    st.session_state["swot_auto_run"] = False
 
 col_inp, col_ex = st.columns([3, 2], gap="large")
 
@@ -278,6 +280,7 @@ with col_ex:
         with ex_cols[i % 3]:
             if st.button(label, key=f"ex_{ticker}", width='stretch'):
                 st.session_state["swot_prefill"] = ticker
+                st.session_state["swot_auto_run"] = True
                 st.rerun()
 
 with col_inp:
@@ -293,6 +296,11 @@ with col_inp:
 
 run_clicked = st.button("Generate SWOT Analysis", type="primary",
                          width='stretch', key="swot_run")
+
+# Auto-run when a quick example was clicked
+if st.session_state.get("swot_auto_run") and company_query.strip():
+    run_clicked = True
+    st.session_state["swot_auto_run"] = False
 
 # ── Session state for caching results ────────────────────────────────
 if "swot_result" not in st.session_state:
@@ -506,13 +514,17 @@ Enter a company name or ticker and click "Generate SWOT Analysis"
 The engine will fetch live financial data, recent news, peer comparisons,
 and use Groq AI (Llama 3.3 70B) to synthesize a professional SWOT analysis.
 </div>
-<div style="margin-top:20px; display:flex; justify-content:center; gap:20px; flex-wrap:wrap;">
-<span style="background:#0d2818;color:#4ade80;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #4ade80;">RELIANCE.NS</span>
-<span style="background:#0d2818;color:#4ade80;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #4ade80;">TCS.NS</span>
-<span style="background:#040f1f;color:#60a5fa;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #60a5fa;">AAPL</span>
-<span style="background:#040f1f;color:#60a5fa;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #60a5fa;">NVDA</span>
-</div>
 </div>""", unsafe_allow_html=True)
+    placeholder_cols = st.columns(4)
+    placeholder_tickers = [
+        ("RELIANCE.NS", "🇮🇳"), ("TCS.NS", "🇮🇳"), ("AAPL", "🇺🇸"), ("NVDA", "🇺🇸"),
+    ]
+    for i, (pticker, pflag) in enumerate(placeholder_tickers):
+        with placeholder_cols[i]:
+            if st.button(f"{pflag} {pticker}", key=f"ph_{pticker}", width='stretch'):
+                st.session_state["swot_prefill"] = pticker
+                st.session_state["swot_auto_run"] = True
+                st.rerun()
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────
 with st.sidebar:

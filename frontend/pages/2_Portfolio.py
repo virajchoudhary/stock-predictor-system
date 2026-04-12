@@ -588,13 +588,11 @@ def _render_deep_report_progress(
     progress_value = max(0.0, min(float(progress_value), 1.0))
     progress_percent = int(round(progress_value * 100))
     timer_id = f"deep-report-elapsed-{int(start_time * 1000)}"
+    eta_id = f"deep-report-eta-{int(start_time * 1000)}"
     stage_label_safe = html.escape(stage_label)
     detail_safe = html.escape(detail)
-    remaining_label = (
-        _format_duration(eta_seconds)
-        if eta_seconds is not None
-        else "Calculating..."
-    )
+    is_complete = progress_value >= 1.0
+    elapsed_now = time.time() - start_time
 
     with placeholder.container():
         st.progress(progress_percent)
@@ -613,7 +611,7 @@ def _render_deep_report_progress(
                 </div>
                 <div style="min-width:180px;">
                   <div style="font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:0.08em;">Estimated Remaining</div>
-                  <div style="font-size:16px;font-weight:600;margin-top:4px;">{remaining_label}</div>
+                  <div id="{eta_id}" style="font-size:16px;font-weight:600;margin-top:4px;">Calculating...</div>
                 </div>
               </div>
               <div style="font-size:13px;color:#cbd5e1;margin-top:12px;">{detail_safe}</div>
@@ -621,26 +619,52 @@ def _render_deep_report_progress(
             <script>
             (function() {{
               const startTime = {int(start_time * 1000)};
-              const timer = document.getElementById("{timer_id}");
+              const renderTime = Date.now();
+              const progressNow = {progress_value};
+              const elapsedAtRender = {elapsed_now};
+              const etaAtRender = {eta_seconds if eta_seconds is not None else -1};
+              const isComplete = {'true' if is_complete else 'false'};
+              const timerEl = document.getElementById("{timer_id}");
+              const etaEl = document.getElementById("{eta_id}");
+
               function formatDuration(totalSeconds) {{
+                totalSeconds = Math.max(0, Math.floor(totalSeconds));
                 const hours = Math.floor(totalSeconds / 3600);
                 const minutes = Math.floor((totalSeconds % 3600) / 60);
                 const seconds = totalSeconds % 60;
-                if (hours > 0) {{
-                  return `${{hours}}h ${{minutes}}m ${{seconds}}s`;
-                }}
-                if (minutes > 0) {{
-                  return `${{minutes}}m ${{seconds}}s`;
-                }}
-                return `${{seconds}}s`;
+                if (hours > 0) return hours + "h " + minutes + "m " + seconds + "s";
+                if (minutes > 0) return minutes + "m " + seconds + "s";
+                return seconds + "s";
               }}
-              function updateTimer() {{
-                if (!timer) return;
-                const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startTime) / 1000));
-                timer.textContent = formatDuration(elapsedSeconds);
+
+              function update() {{
+                if (!timerEl) return;
+                const now = Date.now();
+                if (isComplete) {{
+                  // Freeze the elapsed timer at the moment the report completed
+                  timerEl.textContent = formatDuration(elapsedAtRender);
+                  if (etaEl) etaEl.textContent = "Done!";
+                  return;
+                }}
+                const elapsedSeconds = Math.max(0, (now - startTime) / 1000);
+                timerEl.textContent = formatDuration(elapsedSeconds);
+
+                if (etaEl) {{
+                  if (etaAtRender > 0) {{
+                    // Compute how many seconds have passed since this render
+                    const sinceRender = Math.max(0, (now - renderTime) / 1000);
+                    const remaining = Math.max(0, etaAtRender - sinceRender);
+                    etaEl.textContent = remaining < 1 ? "Almost done..." : formatDuration(remaining);
+                  }} else {{
+                    etaEl.textContent = "Calculating...";
+                  }}
+                }}
               }}
-              updateTimer();
-              window.setInterval(updateTimer, 1000);
+
+              update();
+              if (!isComplete) {{
+                window.setInterval(update, 1000);
+              }}
             }})();
             </script>
             """,

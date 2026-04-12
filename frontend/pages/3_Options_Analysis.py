@@ -519,27 +519,135 @@ with tab_bs:
 # ---------------------------------------------------------------------------
 with tab_surface:
     st.subheader("3D Implied Volatility Surface")
-    st.info(
-        "Visualising the volatility structure across Strikes and Time. "
-        "(Mock data generated for visualisation — real surface requires fetching multiple expiries.)"
+
+    vol_symbol = st.text_input(
+        "Symbol for IV Surface",
+        "SPY",
+        key="vol_surface_symbol",
+        help="Enter a US stock/ETF with listed options (e.g. SPY, AAPL, QQQ, MSFT).",
     )
 
-    spot_ref    = spot_price if "spot_price" in dir() and spot_price else 150.0
-    strikes_vis = np.linspace(spot_ref * 0.8, spot_ref * 1.2, 20)
-    times_vis   = np.linspace(0.1, 1.0, 10)
+    @st.cache_data(ttl=600, show_spinner="Fetching option chains across expiries...")
+    def _build_iv_surface(sym):
+        """Fetch real IV data from multiple expiries via yfinance."""
+        ticker = yf.Ticker(sym)
+        try:
+            expirations = ticker.options
+        except Exception:
+            return None, None, None, None
 
-    S_mesh, T_mesh = np.meshgrid(strikes_vis, times_vis)
-    IV_mesh = 0.2 + 0.1 * ((S_mesh - spot_ref) / spot_ref) ** 2 + 0.05 * np.exp(-T_mesh)
+        if not expirations or len(expirations) < 2:
+            return None, None, None, None
 
-    fig_surf = go.Figure(data=[go.Surface(z=IV_mesh, x=strikes_vis, y=times_vis)])
-    fig_surf.update_layout(
-        title="Implied Volatility Surface",
-        scene=dict(
-            xaxis_title="Strike",
-            yaxis_title="Time to Expiry (Years)",
-            zaxis_title="Implied Volatility",
-        ),
-    )
-    st.plotly_chart(fig_surf, width='stretch')
+        hist = ticker.history(period="1d")
+        current_price = float(hist["Close"].iloc[-1]) if not hist.empty else None
+        if current_price is None:
+            return None, None, None, None
 
+        all_strikes = []
+        all_ttes = []
+        all_ivs = []
 
+        now = datetime.now()
+        # Use up to 8 expiries for a good surface
+        for exp_str in expirations[:8]:
+            try:
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d")
+                tte = max((exp_date - now).days / 365.0, 0.01)
+
+                chain = ticker.option_chain(exp_str)
+                calls = chain.calls.copy()
+                calls["strike"] = pd.to_numeric(calls["strike"], errors="coerce")
+                calls["impliedVolatility"] = pd.to_numeric(calls["impliedVolatility"], errors="coerce")
+                calls = calls.dropna(subset=["strike", "impliedVolatility"])
+                calls = calls[calls["impliedVolatility"] > 0.01]
+
+                # Filter to strikes within ±25% of spot
+                lower = current_price * 0.75
+                upper = current_price * 1.25
+                calls = calls[(calls["strike"] >= lower) & (calls["strike"] <= upper)]
+
+                for _, row in calls.iterrows():
+                    all_strikes.append(float(row["strike"]))
+                    all_ttes.append(tte)
+                    all_ivs.append(float(row["impliedVolatility"]))
+
+            except Exception:
+                continue
+
+        if len(all_strikes) < 10:
+            return None, None, None, current_price
+
+        return (
+            np.array(all_strikes),
+            np.array(all_ttes),
+            np.array(all_ivs),
+            current_price,
+        )
+
+    if vol_symbol:
+        strikes_arr, ttes_arr, ivs_arr, spot_ref_val = _build_iv_surface(vol_symbol.strip().upper())
+
+        if strikes_arr is not None and len(strikes_arr) >= 10:
+            st.success(
+                f"**Live IV Surface** — Built from {len(strikes_arr)} option contracts "
+                f"across multiple expiries for `{vol_symbol.strip().upper()}` (spot: ${spot_ref_val:,.2f})."
+            )
+
+            fig_surf = go.Figure(data=[go.Mesh3d(
+                x=strikes_arr,
+                y=ttes_arr,
+                z=ivs_arr,
+                intensity=ivs_arr,
+                colorscale="Viridis",
+                opacity=0.85,
+                colorbar=dict(title="IV"),
+                hovertemplate=(
+                    "Strike: $%{x:,.0f}<br>"
+                    "Time to Expiry: %{y:.2f}y<br>"
+                    "Implied Vol: %{z:.1%}<extra></extra>"
+                ),
+            )])
+            fig_surf.update_layout(
+                title=f"Implied Volatility Surface — {vol_symbol.strip().upper()}",
+                scene=dict(
+                    xaxis_title="Strike ($)",
+                    yaxis_title="Time to Expiry (Years)",
+                    zaxis_title="Implied Volatility",
+                ),
+                height=600,
+            )
+            st.plotly_chart(fig_surf, width='stretch')
+
+            st.caption(
+                "This surface is constructed from real call-option implied volatilities "
+                "fetched via yfinance across multiple listed expiration dates. "
+                "It reveals the volatility smile/skew and term structure of the underlying."
+            )
+        else:
+            # Parametric fallback
+            fallback_spot = spot_ref_val if spot_ref_val else 150.0
+            st.warning(
+                f"Live option chain data unavailable for `{vol_symbol.strip().upper()}`. "
+                "Displaying a parametric volatility surface model."
+            )
+            strikes_vis = np.linspace(fallback_spot * 0.8, fallback_spot * 1.2, 20)
+            times_vis   = np.linspace(0.1, 1.0, 10)
+            S_mesh, T_mesh = np.meshgrid(strikes_vis, times_vis)
+            IV_mesh = 0.2 + 0.1 * ((S_mesh - fallback_spot) / fallback_spot) ** 2 + 0.05 * np.exp(-T_mesh)
+
+            fig_surf = go.Figure(data=[go.Surface(z=IV_mesh, x=strikes_vis, y=times_vis, colorscale="Viridis")])
+            fig_surf.update_layout(
+                title="Parametric Implied Volatility Surface (Model)",
+                scene=dict(
+                    xaxis_title="Strike",
+                    yaxis_title="Time to Expiry (Years)",
+                    zaxis_title="Implied Volatility",
+                ),
+                height=600,
+            )
+            st.plotly_chart(fig_surf, width='stretch')
+            st.caption(
+                "This is a parametric model surface (not live data). "
+                "Enter a US equity ticker with listed options (e.g. SPY, AAPL) to see real implied volatilities."
+            )
