@@ -276,7 +276,7 @@ with col_ex:
     ]
     for i, (label, ticker) in enumerate(examples):
         with ex_cols[i % 3]:
-            if st.button(label, key=f"ex_{ticker}", use_container_width=True):
+            if st.button(label, key=f"ex_{ticker}", width='stretch'):
                 st.session_state["swot_prefill"] = ticker
                 st.rerun()
 
@@ -292,7 +292,7 @@ with col_inp:
     st.caption("Supports: Indian companies (NSE/BSE) and US stocks. Enter name or ticker symbol.")
 
 run_clicked = st.button("Generate SWOT Analysis", type="primary",
-                         use_container_width=True, key="swot_run")
+                         width='stretch', key="swot_run")
 
 # ── Session state for caching results ────────────────────────────────
 if "swot_result" not in st.session_state:
@@ -411,7 +411,7 @@ Generated: {generated_at}
     if pm:
         chart_fig = render_mini_chart(pm, company_name, curr)
         if chart_fig:
-            st.plotly_chart(chart_fig, use_container_width=True)
+            st.plotly_chart(chart_fig, width='stretch')
 
     # ── SWOT QUADRANTS ────────────────────────────────────────────────
     st.divider()
@@ -444,7 +444,7 @@ Generated: {generated_at}
         st.divider()
         st.markdown('<div class="sec-title">Competitor Benchmarking</div>', unsafe_allow_html=True)
         peer_df = pd.DataFrame(peers)
-        st.dataframe(peer_df, use_container_width=True, hide_index=True)
+        st.dataframe(peer_df, width='stretch', hide_index=True)
 
     # ── NEWS FEED ─────────────────────────────────────────────────────
     if news:

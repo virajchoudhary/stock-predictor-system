@@ -150,12 +150,12 @@ def _render_allocation_bar_table(allocation):
             margin=dict(t=20, b=20),
             showlegend=False,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     with col_table:
         table_df = df.copy()
         table_df["Weight"] = table_df["Weight"].map(lambda x: f"{x:.2%}")
-        st.dataframe(table_df.set_index("Ticker"), use_container_width=True)
+        st.dataframe(table_df.set_index("Ticker"), width='stretch')
 
 
 def _build_allocation_bar_figure(allocation, title="Risk-Based Allocation"):
@@ -921,11 +921,11 @@ def _render_deep_report_sections(report_context):
                                 list(block["data"].items()),
                                 columns=["Metric", "Value"],
                             )
-                            st.dataframe(metrics_df.set_index("Metric"), use_container_width=True)
+                            st.dataframe(metrics_df.set_index("Metric"), width='stretch')
                         elif block["type"] == "table_html":
                             try:
                                 table_df = pd.read_html(StringIO(block["data"]))[0]
-                                st.dataframe(table_df, use_container_width=True)
+                                st.dataframe(table_df, width='stretch')
                             except Exception:
                                 st.markdown(block["data"], unsafe_allow_html=True)
 
@@ -934,13 +934,13 @@ def _render_deep_report_sections(report_context):
                 if block["type"] == "plot":
                     fig = _style_report_figure(block["data"], block["title"])
                     if _figure_has_data(fig):
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
                     else:
                         st.info(f"{block['title']} is not available for the current data selection.")
                 elif block["type"] == "table_html":
                     try:
                         table_df = pd.read_html(StringIO(block["data"]))[0]
-                        st.dataframe(table_df, use_container_width=True)
+                        st.dataframe(table_df, width='stretch')
                     except Exception:
                         st.markdown(block["data"], unsafe_allow_html=True)
 
@@ -1314,7 +1314,7 @@ with tab_bl:
                 [(t, f"{w:.2%}") for t, w in mcap_weights.items()],
                 columns=["Ticker", "Market Weight"]
             )
-            st.dataframe(w_df.set_index("Ticker"), use_container_width=True)
+            st.dataframe(w_df.set_index("Ticker"), width='stretch')
 
         # --- View Builder ---
         st.markdown("#### Views")
@@ -1465,7 +1465,7 @@ with tab_bl:
                 margin=dict(t=30, b=30),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02),
             )
-            st.plotly_chart(fig_weights, use_container_width=True)
+            st.plotly_chart(fig_weights, width='stretch')
 
             # --- Time period performance summary ---
             st.subheader("Time Period Performance")
@@ -1574,7 +1574,7 @@ with tab_bl:
                                 _color_signed,
                                 subset=signed_subset,
                             )
-                        st.dataframe(styled_ret_df, use_container_width=True)
+                        st.dataframe(styled_ret_df, width='stretch')
                         st.caption(
                             f"Beta is estimated from the benchmark sample above versus {benchmark_label}. "
                             f"Realized return columns use the selected window ({window_label}). "
@@ -1638,7 +1638,7 @@ with tab_bl:
                                 hovermode="x unified",
                                 margin=dict(t=50, b=30),
                             )
-                            st.plotly_chart(perf_fig, use_container_width=True)
+                            st.plotly_chart(perf_fig, width='stretch')
 
             # --- Allocation impact from BL views ---
             st.subheader("Allocation Tilt From Views")
@@ -1658,7 +1658,7 @@ with tab_bl:
                 margin=dict(t=30, b=30),
                 showlegend=False,
             )
-            st.plotly_chart(tilt_fig, use_container_width=True)
+            st.plotly_chart(tilt_fig, width='stretch')
             st.caption("Positive bars are overweight versus the market portfolio; negative bars are underweight.")
 
             # --- View signal chart ---
@@ -1691,7 +1691,7 @@ with tab_bl:
                     margin=dict(t=30, b=30),
                     legend=dict(orientation="h", yanchor="bottom", y=1.02),
                 )
-                st.plotly_chart(decomp_fig, use_container_width=True)
+                st.plotly_chart(decomp_fig, width='stretch')
                 st.caption(
                     "This shows the normalized long/short direction of each view. "
                     "Lambda is a view-strength coefficient, not a portfolio weight."
@@ -1712,7 +1712,7 @@ with tab_bl:
                         "Implied Return %": iv["implied_return_pct"],
                     })
                 iv_df = pd.DataFrame(iv_rows)
-                st.dataframe(iv_df.set_index("View"), use_container_width=True)
+                st.dataframe(iv_df.set_index("View"), width='stretch')
 
             # --- Omega confidence visualization ---
             st.subheader("Omega Diagonal (View Uncertainty)")
@@ -1732,7 +1732,7 @@ with tab_bl:
                     xaxis_title="View",
                     margin=dict(t=30, b=30),
                 )
-                st.plotly_chart(fig_omega, use_container_width=True)
+                st.plotly_chart(fig_omega, width='stretch')
                 st.caption("Lower omega = higher confidence in the view. Calibrated via Idzorek's method.")
 
             # --- Portfolio stats ---

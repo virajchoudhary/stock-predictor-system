@@ -114,7 +114,7 @@ if st.session_state.analysis_result:
                     ),
                     margin=dict(l=0, r=0, t=40, b=0),
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
                 technicals = data.get("technicals", {})
                 rsi_val = technicals.get("rsi", 50)
@@ -156,7 +156,7 @@ if st.session_state.analysis_result:
                     margin=dict(l=0, r=0, t=10, b=0),
                     height=300,
                 )
-                st.plotly_chart(fig_comp, use_container_width=True)
+                st.plotly_chart(fig_comp, width='stretch')
 
         with tab_financials:
             section_label("Fundamental Comparison")
@@ -170,7 +170,7 @@ if st.session_state.analysis_result:
                 final_cols = [c for c in cols if c in df_fin.columns]
                 st.dataframe(
                     df_fin[final_cols].style.highlight_max(axis=0),
-                    use_container_width=True,
+                    width='stretch',
                 )
             else:
                 st.info("No financial data available.")

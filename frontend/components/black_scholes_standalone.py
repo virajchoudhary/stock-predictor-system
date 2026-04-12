@@ -431,7 +431,7 @@ with tab_manual:
     m_sigma = m_sigma_pct / 100.0
     m_q = m_q_pct / 100.0
 
-    if st.button("Analyze Option", use_container_width=True, type="primary", key="m_go"):
+    if st.button("Analyze Option", width='stretch', type="primary", key="m_go"):
         try:
             result = analyze_option(
                 S=m_S, K=m_K, T=m_T, r=m_r, sigma=m_sigma, q=m_q,
@@ -493,11 +493,11 @@ with tab_manual:
             with chart1:
                 premium = result["theoretical_price"][m_otype.lower()]
                 st.plotly_chart(plot_payoff(m_S, m_K, premium, m_otype.lower(), curr),
-                                use_container_width=True)
+                                width='stretch')
             with chart2:
                 st.plotly_chart(
                     plot_greeks_sensitivity(m_S, m_K, m_T, m_r, m_sigma, m_q, m_otype.lower(), curr),
-                    use_container_width=True,
+                    width='stretch',
                 )
 
             # ── Formula Reference ─────────────────────────────────────
@@ -547,7 +547,7 @@ with tab_live:
         live_threshold = st.number_input("Signal Threshold (%)", value=5.0, step=0.5,
                                           key="l_thresh", min_value=1.0)
 
-    if st.button("Fetch and Analyze", use_container_width=True, type="primary", key="l_go"):
+    if st.button("Fetch and Analyze", width='stretch', type="primary", key="l_go"):
         live_market = detect_market(live_sym)
         live_currency = get_currency_symbol(live_market)
         live_r = live_r_pct / 100.0
@@ -681,7 +681,7 @@ with tab_live:
                     st.warning(f"No {opt_t} options to display.")
                     continue
 
-                st.dataframe(style_df(result_df), use_container_width=True, height=420)
+                st.dataframe(style_df(result_df), width='stretch', height=420)
 
                 buys  = len(result_df[result_df["Signal"] == "BUY"])
                 sells = len(result_df[result_df["Signal"] == "SELL"])
@@ -725,7 +725,7 @@ with tab_batch:
         batch_days = st.number_input("Days to Expiry (ATM)", value=30, min_value=7, step=1)
         batch_threshold = st.number_input("Signal Threshold (%)", value=5.0, step=0.5, min_value=1.0)
 
-    if st.button("Run Batch Analysis", use_container_width=True, type="primary", key="batch_go"):
+    if st.button("Run Batch Analysis", width='stretch', type="primary", key="batch_go"):
         symbols = [s.strip() for s in batch_symbols_raw.strip().splitlines() if s.strip()]
         if not symbols:
             st.warning("Enter at least one ticker.")
@@ -779,12 +779,12 @@ with tab_batch:
 
             if batch_rows:
                 batch_df = pd.DataFrame(batch_rows)
-                st.dataframe(batch_df, use_container_width=True, height=450)
+                st.dataframe(batch_df, width='stretch', height=450)
 
                 csv_batch = batch_df.to_csv(index=False)
                 st.download_button("Download Batch Results", csv_batch,
                                    "batch_bs_analysis.csv", mime="text/csv",
-                                   use_container_width=True)
+                                   width='stretch')
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -889,11 +889,11 @@ with tab_csv:
             if "Signal" in df_out.columns:
                 styled_out = styled_out.applymap(_style_csv_signal, subset=["Signal"])
 
-            st.dataframe(styled_out, use_container_width=True, height=500)
+            st.dataframe(styled_out, width='stretch', height=500)
             st.download_button("Download Results CSV",
                                df_out.to_csv(index=False),
                                "bs_results.csv", mime="text/csv",
-                               use_container_width=True)
+                               width='stretch')
 
         except Exception as e:
             st.error(f"Error: {e}")

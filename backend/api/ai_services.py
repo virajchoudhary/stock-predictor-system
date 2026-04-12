@@ -701,3 +701,191 @@ class PortfolioOptimizer:
         except Exception:
             n = len(tickers)
             return {t: round(1.0 / n, 4) for t in tickers}
+
+
+class RLPortfolioAgent:
+    AGENT_WEIGHTS     = {"A2C": 0.35, "SAC": 0.30, "TD3": 0.35}
+    HPO_MIN_TIMESTEPS = 10000
+    MODEL_DIR         = os.path.join(os.path.dirname(__file__), "rl_models")
+    PROGRESS_DIR      = os.path.join(os.path.dirname(__file__), "rl_progress")
+    HPO_CACHE_DIR     = os.path.join(os.path.dirname(__file__), "rl_hpo_cache")
+
+    def __init__(self):
+        os.makedirs(self.MODEL_DIR,    exist_ok=True)
+        os.makedirs(self.PROGRESS_DIR, exist_ok=True)
+        os.makedirs(self.HPO_CACHE_DIR, exist_ok=True)
+
+    def _hpo_cache_path(self, tickers):
+        return os.path.join(self.HPO_CACHE_DIR, f"{_ticker_hash(tickers)}.json")
+
+    def _load_hpo_cache(self, tickers):
+        path = self._hpo_cache_path(tickers)
+        if os.path.exists(path):
+            try:
+                with open(path) as fh: return json.load(fh)
+            except Exception: pass
+        return None
+
+    def _save_hpo_cache(self, tickers, hpo_results):
+        with open(self._hpo_cache_path(tickers), "w") as fh:
+            json.dump(hpo_results, fh, indent=2)
+
+    def _ticker_hash_for_response(self, tickers):
+        return _ticker_hash(tickers)
+
+    def _fetch_data(self, tickers, period="2y"):
+        frames = {}
+        for t in tickers:
+            try:
+                hist = yf.Ticker(t).history(period=period)
+                if not hist.empty:
+                    hist.index = pd.to_datetime(hist.index.date)
+                    frames[t] = hist["Close"]
+            except Exception: continue
+        if len(frames) < 2:
+            raise ValueError("Need at least 2 tickers with valid data.")
+        df = pd.DataFrame(frames).ffill().dropna()
+        if len(df) < 60:
+            raise ValueError("Not enough aligned data.")
+        return df
+
+    def _write_progress(self, progress_file, progress, status, timestep=0, total_timesteps=0, reward=0, extra=None):
+        data = {"progress": round(progress, 1), "status": status,
+                "timestep": timestep, "total_timesteps": total_timesteps,
+                "reward": round(float(reward), 4)}
+        if extra: data.update(extra)
+        with open(progress_file, "w") as fh: json.dump(data, fh)
+
+    def train(self, tickers, timesteps=10000, session_id="default", use_hpo=True):
+        if not GYM_AVAILABLE or not SB3_AVAILABLE:
+            raise ImportError("Install: pip install stable-baselines3 gymnasium")
+        progress_file = os.path.join(self.PROGRESS_DIR, f"{session_id}.json")
+        self._write_progress(progress_file, 0, "fetching_data", total_timesteps=timesteps)
+        price_data = self._fetch_data(tickers)
+        self._write_progress(progress_file, 0, "fetching_fundamentals", total_timesteps=timesteps)
+        ticker_features = fetch_ticker_features(tickers)
+
+        evolved_hyperparams = None
+        if use_hpo and timesteps >= self.HPO_MIN_TIMESTEPS:
+            cached_hpo = self._load_hpo_cache(tickers)
+            if cached_hpo:
+                evolved_hyperparams = cached_hpo
+                self._write_progress(progress_file, 5, "hpo_loaded_from_cache", total_timesteps=timesteps)
+            else:
+                self._write_progress(progress_file, 2, "hpo_running", total_timesteps=timesteps)
+                try:
+                    from .evolution import run_rl_hpo_all_agents
+                    hpo_results = run_rl_hpo_all_agents(price_data, ticker_features, pop_size=3, generations=2, eval_timesteps=500)
+                    evolved_hyperparams = {a: r["hyperparams"] for a, r in hpo_results.items() if r.get("hyperparams") is not None}
+                    self._save_hpo_cache(tickers, evolved_hyperparams)
+                    self._write_progress(progress_file, 20, "hpo_complete", total_timesteps=timesteps,
+                                         extra={"hpo_source": "evolved", "evolved_hyperparams": evolved_hyperparams})
+                except Exception as e:
+                    evolved_hyperparams = None
+                    self._write_progress(progress_file, 20, "hpo_skipped", total_timesteps=timesteps, extra={"hpo_error": str(e)})
+
+        hpo_offset  = 20.0 if evolved_hyperparams is not None else 0.0
+        agent_share = (99.0 - hpo_offset) / 3.0 / 100.0
+        trained_models = {}
+        all_rewards    = {}
+
+        for agent_name, rel_offset in [("A2C", 0), ("SAC", agent_share), ("TD3", 2 * agent_share)]:
+            abs_offset = (hpo_offset + rel_offset * 100) / 100.0
+            self._write_progress(progress_file, hpo_offset + rel_offset * 100, f"training_{agent_name}",
+                                  total_timesteps=timesteps, extra={"current_agent": agent_name})
+            hp  = (evolved_hyperparams or {}).get(agent_name)
+            vec = DummyVecEnv([lambda: PortfolioEnv(price_data, ticker_features)])
+            cb  = ProgressCallback(timesteps, progress_file, offset_pct=abs_offset, scale_pct=agent_share)
+            if agent_name == "A2C":
+                model = _make_a2c(vec, hyperparams=hp)
+            elif agent_name == "SAC":
+                model = _make_sac(PortfolioEnv(price_data, ticker_features), len(tickers), hyperparams=hp)
+            else:
+                model = _make_td3(PortfolioEnv(price_data, ticker_features), len(tickers), hyperparams=hp)
+            model.learn(total_timesteps=timesteps, callback=cb)
+            model.save(os.path.join(self.MODEL_DIR, f"{session_id}_{agent_name}"))
+            trained_models[agent_name] = model
+            all_rewards[agent_name]    = float(cb.current_reward)
+
+        self._write_progress(progress_file, 99, "evaluating", total_timesteps=timesteps)
+        agent_allocs   = {}
+        agent_histories = {}
+        agent_dates    = {}
+        for agent_name, model in trained_models.items():
+            alloc, hist, dates = self._evaluate_single(model, price_data, ticker_features)
+            agent_allocs[agent_name]    = alloc
+            agent_histories[agent_name] = hist
+            agent_dates[agent_name]     = dates
+
+        ensemble_weights = np.zeros(len(tickers))
+        for agent_name, w in self.AGENT_WEIGHTS.items():
+            if agent_name in agent_allocs:
+                arr = np.array([agent_allocs[agent_name].get(t, 0.0) for t in tickers])
+                ensemble_weights += w * arr
+        ensemble_weights = _cap_and_renormalize(ensemble_weights / (ensemble_weights.sum() + 1e-8))
+        ensemble_alloc   = {t: round(float(w), 4) for t, w in zip(tickers, ensemble_weights)}
+
+        primary_hist  = agent_histories["A2C"]
+        final_value   = primary_hist[-1] if primary_hist else 100000
+        total_return  = ((final_value / 100000) - 1) * 100
+
+        agent_metrics = {}
+        for agent_name, hist in agent_histories.items():
+            if len(hist) > 1:
+                rets = np.diff(hist) / (np.array(hist[:-1]) + 1e-8)
+                agent_metrics[agent_name] = {
+                    "final_value":  round(hist[-1], 2),
+                    "total_return": round((hist[-1] / 100000 - 1) * 100, 2),
+                    "sharpe":       round(float(np.mean(rets) / (np.std(rets) + 1e-8) * np.sqrt(252)), 3),
+                    "sortino":      round(_sortino_ratio(rets), 3),
+                    "max_drawdown": round(float(self._max_drawdown(hist)), 4),
+                    "allocation":   agent_allocs[agent_name],
+                }
+
+        result = {
+            "progress": 100, "status": "complete",
+            "timestep": timesteps, "total_timesteps": timesteps,
+            "reward":   float(np.mean(list(all_rewards.values()))),
+            "allocation": ensemble_alloc,
+            "portfolio_history": primary_hist,
+            "portfolio_dates":   agent_dates["A2C"],
+            "tickers": tickers,
+            "ticker_features": {t: {k: round(v, 3) for k, v in fm.items()} for t, fm in ticker_features.items()},
+            "agent_metrics": agent_metrics,
+            "final_value": final_value,
+            "total_return": total_return,
+            "hpo_used": evolved_hyperparams is not None,
+            "hpo_source": "evolved" if evolved_hyperparams is not None else "defaults",
+            "evolved_hyperparams": evolved_hyperparams or {},
+        }
+        with open(progress_file, "w") as fh: json.dump(result, fh)
+        return result
+
+    def _evaluate_single(self, model, price_data, ticker_features):
+        env = PortfolioEnv(price_data, ticker_features)
+        obs, _ = env.reset()
+        done = False
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, _, done, _, _ = env.step(action)
+        allocation = {t: round(float(w), 4) for t, w in zip(price_data.columns, env.weights)}
+        history    = [round(v, 2) for v in env.portfolio_history]
+        start_idx  = env.WINDOW
+        date_index = price_data.index[start_idx:start_idx + len(history)]
+        dates = [str(d.date()) if hasattr(d, "date") else str(d) for d in date_index]
+        while len(dates) < len(history): dates.append("")
+        return allocation, history, dates
+
+    def _max_drawdown(self, history):
+        arr  = np.array(history)
+        peak = np.maximum.accumulate(arr)
+        return float(((peak - arr) / (peak + 1e-8)).max())
+
+    def get_progress(self, session_id):
+        pf = os.path.join(self.PROGRESS_DIR, f"{session_id}.json")
+        if not os.path.exists(pf):
+            return {"progress": 0, "status": "not_started"}
+        with open(pf) as fh: return json.load(fh)
+
+
+_rl_agent = RLPortfolioAgent()

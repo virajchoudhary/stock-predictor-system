@@ -283,7 +283,7 @@ with tab_mispricing:
                     xaxis_title="Strike Price",
                     yaxis_title="Implied Volatility",
                 )
-                st.plotly_chart(fig_smile, use_container_width=True)
+                st.plotly_chart(fig_smile, width='stretch')
 
                 st.subheader("Mispricing Alerts")
                 st.dataframe(
@@ -297,7 +297,7 @@ with tab_mispricing:
                         ),
                         subset=["Signal"],
                     ),
-                    use_container_width=True,
+                    width='stretch',
                 )
 
             else:
@@ -461,16 +461,16 @@ with tab_rl_blend:
         c1, c2, c3 = st.columns(3)
         with c1:
             st.caption(f"Quant (Min-Vol) — {quant_pct}%")
-            if q: st.plotly_chart(_donut(q, "Quant"), use_container_width=True)
+            if q: st.plotly_chart(_donut(q, "Quant"), width='stretch')
         with c2:
             st.caption(f"RL Ensemble — {rl_pct}%")
             if r:
-                st.plotly_chart(_donut(r, "ENS"), use_container_width=True)
+                st.plotly_chart(_donut(r, "ENS"), width='stretch')
             else:
                 st.info("Blend set to 0% — RL not trained")
         with c3:
             st.caption(f"Final Blend — {quant_pct}% + {rl_pct}%")
-            st.plotly_chart(_donut(blend, "MIX"), use_container_width=True)
+            st.plotly_chart(_donut(blend, "MIX"), width='stretch')
 
         # Comparison table
         all_t = sorted(set(list(q.keys()) + list(r.keys()) + list(blend.keys())))
@@ -484,7 +484,7 @@ with tab_rl_blend:
                 "Final Blend":  f"{bw:.1%}" if bw > 0 else "—",
                 "Δ RL vs Quant": (f"+{bw-qw:.1%}" if bw-qw >= 0 else f"{bw-qw:.1%}") if qw > 0 else "new",
             })
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
         # Agent metrics
         prog_data = {}
@@ -505,7 +505,7 @@ with tab_rl_blend:
                     "Sortino":      f"{m['sortino']:.3f}",
                     "Max Drawdown": f"{m['max_drawdown']:.2%}",
                 })
-            st.dataframe(pd.DataFrame(m_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(m_rows), width='stretch', hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +540,6 @@ with tab_surface:
             zaxis_title="Implied Volatility",
         ),
     )
-    st.plotly_chart(fig_surf, use_container_width=True)
+    st.plotly_chart(fig_surf, width='stretch')
 
 
