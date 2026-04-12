@@ -36,7 +36,6 @@ from polygon import RESTClient
 polygon_api_key = os.environ.get("POLYGON_API_KEY")
 polygon_client  = RESTClient(api_key=polygon_api_key) if polygon_api_key else None
 
-
 # ---------------------------------------------------------------------------
 # LSTM Model Definition (PyTorch)
 # ---------------------------------------------------------------------------
@@ -885,6 +884,317 @@ class PortfolioOptimizer:
                 blend_meta={},
                 fallback_reason=str(exc),
             )
+
+
+import hashlib
+
+try:
+    import gymnasium as gym
+    from gymnasium import spaces
+    GYM_AVAILABLE = True
+except ImportError:
+    try:
+        import gym
+        from gym import spaces
+        GYM_AVAILABLE = True
+    except ImportError:
+        GYM_AVAILABLE = False
+        class _GymStub:
+            class Env: pass
+            class spaces:
+                class Box: pass
+        gym = _GymStub()
+        spaces = _GymStub.spaces
+
+try:
+    from stable_baselines3 import A2C, SAC, TD3
+    from stable_baselines3.common.callbacks import BaseCallback
+    from stable_baselines3.common.noise import NormalActionNoise
+    from stable_baselines3.common.vec_env import DummyVecEnv
+    SB3_AVAILABLE = True
+except ImportError:
+    SB3_AVAILABLE = False
+    class BaseCallback:
+        def __init__(self, *args, **kwargs): pass
+        def _on_step(self): return True
+
+MAX_SINGLE_WEIGHT  = 0.45
+TRANSACTION_COST   = 0.001
+RISK_FREE_RATE_ANN = 0.05
+
+SECTOR_RISK = {
+    "technology": 1.4, "semiconductors": 1.5, "crypto": 2.0,
+    "energy": 1.3, "consumer cyclical": 1.3, "communication services": 1.2,
+    "financial services": 1.1, "industrials": 1.1, "real estate": 1.2,
+    "basic materials": 1.2, "healthcare": 0.9, "consumer defensive": 0.8,
+    "utilities": 0.7, "computers": 1.4, "oil": 1.3, "banks": 1.1,
+    "pharma": 0.9, "auto": 1.2,
+}
+
+
+def get_sector_risk(sector_str):
+    if not sector_str:
+        return 1.0
+    s = sector_str.lower()
+    for key, mult in SECTOR_RISK.items():
+        if key in s:
+            return mult
+    return 1.0
+
+
+def compute_fundamental_score(info):
+    scores = []
+    for value, scale, invert in [
+        (info.get("trailingPE"), 50.0, True),
+        (info.get("debtToEquity"), 200.0, True),
+        (info.get("revenueGrowth"), 0.20, False),
+    ]:
+        try:
+            v = float(value)
+            scores.append(float(np.clip(1.0 - v / scale if invert else v / scale, 0.0, 1.0)))
+        except Exception:
+            scores.append(0.5)
+    return float(np.mean(scores))
+
+
+def fetch_ticker_features(tickers):
+    features = {}
+    for ticker in tickers:
+        try:
+            info = yf.Ticker(ticker).info
+            sector = info.get("sector", "")
+            fund_score = compute_fundamental_score(info)
+            headlines = []
+            try:
+                for item in (yf.Ticker(ticker).news or [])[:5]:
+                    content = item.get("content", item)
+                    title = content.get("title", item.get("title", ""))
+                    if title:
+                        headlines.append(title)
+            except Exception:
+                pass
+            sentiment = 0.0
+            if groq_client and headlines:
+                try:
+                    joined = "\n".join(f"- {h}" for h in headlines[:5])
+                    resp = groq_client.chat.completions.create(
+                        messages=[{"role": "user", "content": f"Return ONLY a float -1.0 to 1.0 for sentiment of these {ticker} headlines:\n{joined}"}],
+                        model="llama-3.3-70b-versatile", max_tokens=10,
+                    )
+                    sentiment = float(np.clip(float(resp.choices[0].message.content.strip()), -1.0, 1.0))
+                except Exception:
+                    pass
+            features[ticker] = {"fundamental_score": fund_score, "news_sentiment": sentiment, "sector_risk": get_sector_risk(sector)}
+        except Exception:
+            features[ticker] = {"fundamental_score": 0.5, "news_sentiment": 0.0, "sector_risk": 1.0}
+    return features
+
+
+def _rolling_rsi(prices, window=14):
+    if len(prices) < window + 1:
+        return 0.5
+    deltas = np.diff(prices)
+    gain = np.mean(np.maximum(deltas, 0.0)[-window:])
+    loss = np.mean(np.maximum(-deltas, 0.0)[-window:])
+    if loss < 1e-10:
+        return 1.0
+    return float(1.0 - 1.0 / (1.0 + gain / loss))
+
+
+def _rolling_macd(prices):
+    if len(prices) < 26:
+        return 0.0
+    s = pd.Series(prices)
+    macd = s.ewm(span=12, adjust=False).mean() - s.ewm(span=26, adjust=False).mean()
+    signal = macd.ewm(span=9, adjust=False).mean()
+    return float(np.clip((macd - signal).iloc[-1] / (np.std(prices[-26:]) + 1e-8), -1.0, 1.0))
+
+
+def _bollinger_pct(prices, window=20):
+    if len(prices) < window:
+        return 0.5
+    s = pd.Series(prices[-window:])
+    return float(np.clip((prices[-1] - (s.mean() - 2 * s.std())) / (4 * s.std() + 1e-8), 0.0, 1.0))
+
+
+def _cap_and_renormalize(weights, cap=MAX_SINGLE_WEIGHT):
+    capped = weights.copy()
+    for _ in range(len(capped)):
+        excess = np.maximum(capped - cap, 0.0)
+        if excess.sum() < 1e-9:
+            break
+        capped = np.minimum(capped, cap)
+        pool = excess.sum()
+        free = capped < cap
+        if not free.any():
+            capped[:] = 1.0 / len(capped)
+            break
+        fw = capped[free].sum()
+        if fw <= 1e-9:
+            capped[:] = 1.0 / len(capped)
+            break
+        capped[free] += pool * (capped[free] / fw)
+    total = capped.sum()
+    return capped / total if total > 0 else capped
+
+
+def _sortino_ratio(returns_arr, rf_daily=RISK_FREE_RATE_ANN / 252):
+    if len(returns_arr) < 5:
+        return 0.0
+    excess = returns_arr - rf_daily
+    dd_std = np.sqrt(np.mean(np.minimum(excess, 0.0) ** 2)) + 1e-8
+    return float(np.mean(excess) / dd_std * np.sqrt(252))
+
+
+def _volatility_regime(returns_arr, window=20):
+    if len(returns_arr) < window:
+        return 0.5
+    recent = np.std(returns_arr[-window:])
+    hist = np.std(returns_arr)
+    if hist < 1e-10:
+        return 0.5
+    return float(np.clip(recent / (2.0 * hist), 0.0, 1.0))
+
+
+def _ticker_hash(tickers):
+    key = "_".join(sorted(t.upper() for t in tickers))
+    return hashlib.md5(key.encode()).hexdigest()[:12]
+
+
+class ProgressCallback(BaseCallback):
+    def __init__(self, total_timesteps, progress_file, offset_pct=0.0, scale_pct=1.0):
+        super().__init__()
+        self.total_timesteps = total_timesteps
+        self.progress_file   = progress_file
+        self.offset_pct      = offset_pct
+        self.scale_pct       = scale_pct
+        self.current_reward  = 0.0
+
+    def _on_step(self):
+        try:
+            self.current_reward += float(np.ravel(self.locals.get("rewards", [0]))[0])
+        except Exception:
+            pass
+        raw = min(self.num_timesteps / self.total_timesteps, 1.0)
+        overall = self.offset_pct + raw * self.scale_pct
+        if self.num_timesteps % 100 == 0:
+            with open(self.progress_file, "w") as fh:
+                json.dump({"progress": round(overall * 100, 1), "timestep": self.num_timesteps,
+                           "total_timesteps": self.total_timesteps,
+                           "reward": round(float(self.current_reward), 4), "status": "training"}, fh)
+        return True
+
+
+class PortfolioEnv(gym.Env):
+    WINDOW = 30
+    INITIAL_CAPITAL = 100_000.0
+
+    def __init__(self, price_data, ticker_features):
+        super().__init__()
+        self.price_data   = price_data.copy()
+        self.returns      = price_data.pct_change().fillna(0)
+        self.prices_arr   = price_data.values
+        self.n_assets     = len(price_data.columns)
+        self.tickers      = list(price_data.columns)
+        self.ticker_features = ticker_features
+        self._mom5  = price_data.pct_change(5).fillna(0).values
+        self._mom20 = price_data.pct_change(20).fillna(0).values
+        self._fund_scores  = np.array([ticker_features.get(t, {}).get("fundamental_score", 0.5) for t in self.tickers], dtype=np.float32)
+        self._sentiments   = np.array([ticker_features.get(t, {}).get("news_sentiment",    0.0) for t in self.tickers], dtype=np.float32)
+        self._sector_risks = np.array([ticker_features.get(t, {}).get("sector_risk",       1.0) for t in self.tickers], dtype=np.float32)
+        obs_size = self.WINDOW * self.n_assets + 7 * self.n_assets + self.n_assets + 2
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32)
+        self.action_space      = spaces.Box(low=0.0,    high=1.0,    shape=(self.n_assets,), dtype=np.float32)
+        self.reset()
+
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        self.current_step    = self.WINDOW
+        self.portfolio_value = self.INITIAL_CAPITAL
+        self.peak_value      = self.INITIAL_CAPITAL
+        self.weights         = np.ones(self.n_assets) / self.n_assets
+        self.prev_weights    = self.weights.copy()
+        self.portfolio_history = [self.INITIAL_CAPITAL]
+        return self._get_obs(), {}
+
+    def _get_obs(self):
+        idx    = self.current_step
+        recent = self.returns.iloc[idx - self.WINDOW : idx].values
+        if recent.shape[0] < self.WINDOW:
+            recent = np.vstack([np.zeros((self.WINDOW - recent.shape[0], self.n_assets)), recent])
+        mom5  = self._mom5[idx]  if idx < len(self._mom5)  else np.zeros(self.n_assets)
+        mom20 = self._mom20[idx] if idx < len(self._mom20) else np.zeros(self.n_assets)
+        lb    = min(idx, 60)
+        rsi_v = np.zeros(self.n_assets, dtype=np.float32)
+        mac_v = np.zeros(self.n_assets, dtype=np.float32)
+        bol_v = np.zeros(self.n_assets, dtype=np.float32)
+        for i in range(self.n_assets):
+            sl = self.prices_arr[max(0, idx - lb):idx + 1, i]
+            rsi_v[i] = _rolling_rsi(sl)
+            mac_v[i] = _rolling_macd(sl)
+            bol_v[i] = _bollinger_pct(sl)
+        regime = _volatility_regime(self.returns.values[:idx].mean(axis=1))
+        return np.concatenate([recent.flatten(), mom5, mom20, rsi_v, mac_v, bol_v,
+                                self._fund_scores, self._sentiments, self.weights,
+                                [self.portfolio_value / self.INITIAL_CAPITAL, regime]]).astype(np.float32)
+
+    def step(self, action):
+        action = np.clip(action, 0, None)
+        s = action.sum()
+        raw = action / s if s > 0 else np.ones(self.n_assets) / self.n_assets
+        self.weights = _cap_and_renormalize(raw, MAX_SINGLE_WEIGHT)
+        if self.current_step >= len(self.returns):
+            return self._get_obs(), 0.0, True, False, {}
+        turnover = float(np.sum(np.abs(self.weights - self.prev_weights)))
+        tc = TRANSACTION_COST * turnover
+        self.prev_weights = self.weights.copy()
+        daily_ret = self.returns.iloc[self.current_step].values
+        port_ret  = float(np.dot(self.weights, daily_ret)) - tc
+        self.portfolio_value *= 1 + port_ret
+        self.portfolio_history.append(self.portfolio_value)
+        if self.portfolio_value > self.peak_value:
+            self.peak_value = self.portfolio_value
+        drawdown = (self.peak_value - self.portfolio_value) / (self.peak_value + 1e-8)
+        reward = port_ret
+        if len(self.portfolio_history) >= 10:
+            h = np.array(self.portfolio_history[-60:])
+            r = np.diff(h) / (h[:-1] + 1e-8)
+            reward += 0.02 * _sortino_ratio(r)
+        reward -= float(np.dot(self.weights, self._sector_risks)) * 0.015 * drawdown
+        reward += 0.008 * (-float(np.sum(self.weights * np.log(self.weights + 1e-8))))
+        reward -= 0.005 * float(np.sum(np.maximum(self.weights - 0.30, 0.0) ** 2))
+        reward += 0.003 * float(np.dot(self.weights, self._fund_scores - 0.5))
+        reward += 0.003 * float(np.dot(self.weights, self._sentiments))
+        self.current_step += 1
+        done = self.current_step >= len(self.returns) - 1
+        return self._get_obs(), float(reward), done, False, {}
+
+    def render(self): pass
+
+
+def _make_a2c(env, hyperparams=None):
+    hp = hyperparams or {}
+    return A2C("MlpPolicy", env, verbose=0, learning_rate=hp.get("learning_rate", 7e-4),
+               n_steps=int(hp.get("n_steps", 5)), gamma=hp.get("gamma", 0.99),
+               gae_lambda=hp.get("gae_lambda", 1.0), ent_coef=hp.get("ent_coef", 0.01),
+               policy_kwargs=dict(net_arch=dict(pi=[256, 256], vf=[256, 256])))
+
+
+def _make_sac(env, n_assets, hyperparams=None):
+    hp = hyperparams or {}
+    return SAC("MlpPolicy", env, verbose=0, learning_rate=hp.get("learning_rate", 3e-4),
+               buffer_size=100_000, batch_size=int(hp.get("batch_size", 256)),
+               tau=hp.get("tau", 0.005), gamma=hp.get("gamma", 0.99),
+               ent_coef=hp.get("init_ent_coef", "auto"), policy_kwargs=dict(net_arch=[256, 256]))
+
+
+def _make_td3(env, n_assets, hyperparams=None):
+    hp = hyperparams or {}
+    noise = NormalActionNoise(mean=np.zeros(n_assets), sigma=hp.get("noise_sigma", 0.1) * np.ones(n_assets))
+    return TD3("MlpPolicy", env, verbose=0, learning_rate=hp.get("learning_rate", 1e-3),
+               buffer_size=100_000, batch_size=int(hp.get("batch_size", 256)),
+               tau=hp.get("tau", 0.005), gamma=hp.get("gamma", 0.99),
+               action_noise=noise, policy_kwargs=dict(net_arch=[256, 256]))
 
 
 class RLPortfolioAgent:

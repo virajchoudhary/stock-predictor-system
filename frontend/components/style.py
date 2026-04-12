@@ -1,145 +1,247 @@
 import streamlit as st
 
 _CSS = """
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;1,300&family=IBM+Plex+Sans:wght@300;400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Roboto+Mono:wght@300;400;500&display=swap');
 
 /* ── Base ─────────────────────────────────────────────── */
-[data-testid="stAppViewContainer"]  { background: #080C10; }
-[data-testid="stHeader"]            { background: transparent; border-bottom: 1px solid #1E2D3D; }
-[data-testid="stToolbar"]           { display: none; }
-section[data-testid="stSidebar"]    { background: #0A0E14; border-right: 1px solid #1E2D3D; }
-section[data-testid="stSidebar"] .stMarkdown p { font-family: 'IBM Plex Mono', monospace; font-size: 0.72rem; color: #7A9BB5; }
+[data-testid="stAppViewContainer"]  { background: #131722; }
+[data-testid="stHeader"]            { background: #131722; border-bottom: 1px solid #2A2E39; }
+[data-testid="stToolbar"]           { display: none !important; }
+[data-testid="stHeader"] button     { display: none !important; }
+header [data-testid="stToolbar"]    { display: none !important; }
+.stDeployButton                     { display: none !important; }
+[data-testid="manage-app-button"]   { display: none !important; }
+button[kind="header"]               { display: none !important; }
+section[data-testid="stSidebar"]    { background: #1E222D; border-right: 1px solid #2A2E39; }
+section[data-testid="stSidebar"] .stMarkdown p {
+    font-family: 'Roboto Mono', monospace;
+    font-size: 0.72rem;
+    color: #787B86;
+}
 
 /* ── Body text ───────────────────────────────────────── */
-.main p, .main li { font-family: 'IBM Plex Sans', sans-serif; color: #7A9BB5; font-size: 0.85rem; line-height: 1.7; }
-code { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; background: rgba(0,212,255,0.07); color: #00D4FF; padding: 0.1em 0.35em; border-radius: 2px; }
+.main p, .main li {
+    font-family: 'Inter', sans-serif;
+    color: #787B86;
+    font-size: 0.85rem;
+    line-height: 1.6;
+}
+code {
+    font-family: 'Roboto Mono', monospace;
+    font-size: 0.78rem;
+    background: rgba(33,150,243,0.08);
+    color: #2196F3;
+    padding: 0.1em 0.35em;
+    border-radius: 2px;
+}
+h1, h2, h3 {
+    font-family: 'Inter', sans-serif !important;
+    font-weight: 500 !important;
+    color: #D1D4DC !important;
+    letter-spacing: -0.01em;
+}
 
 /* ── Metrics ─────────────────────────────────────────── */
 [data-testid="stMetric"] {
-    background: #0A0E14;
-    border: 1px solid #1E2D3D;
-    border-radius: 3px;
-    padding: 1rem 1.25rem;
+    background: #1E222D;
+    border: 1px solid #2A2E39;
+    border-radius: 2px;
+    padding: 0.875rem 1.125rem;
 }
 [data-testid="stMetricLabel"] p {
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.58rem !important;
+    font-family: 'Roboto Mono', monospace !important;
+    font-size: 0.57rem !important;
     text-transform: uppercase;
-    letter-spacing: 0.18em;
-    color: #7A9BB5 !important;
+    letter-spacing: 0.15em;
+    color: #787B86 !important;
 }
 [data-testid="stMetricValue"] {
-    font-family: 'IBM Plex Mono', monospace;
-    color: #E8F4FD;
+    font-family: 'Inter', sans-serif;
+    font-weight: 500;
+    color: #D1D4DC;
 }
 
 /* ── Tabs ────────────────────────────────────────────── */
 .stTabs [data-baseweb="tab-list"] {
     background: transparent;
-    border-bottom: 1px solid #1E2D3D;
+    border-bottom: 1px solid #2A2E39;
     gap: 0;
 }
 .stTabs [data-baseweb="tab"] {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'Roboto Mono', monospace;
     font-size: 0.6rem;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: #7A9BB5;
+    color: #787B86;
     background: transparent;
     border-bottom: 2px solid transparent;
-    padding: 0.65rem 1.5rem;
+    padding: 0.6rem 1.25rem;
     margin-bottom: -1px;
     transition: color 0.15s;
 }
-.stTabs [aria-selected="true"] { color: #00D4FF; border-bottom-color: #00D4FF; }
-.stTabs [data-baseweb="tab-panel"] { padding-top: 1.5rem; }
+.stTabs [aria-selected="true"] { color: #2196F3; border-bottom-color: #2196F3; }
+.stTabs [data-baseweb="tab-panel"] { padding-top: 1.25rem; }
 
 /* ── Buttons ─────────────────────────────────────────── */
 .stButton > button {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.62rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+    font-family: 'Inter', sans-serif;
+    font-size: 0.78rem;
+    font-weight: 500;
+    letter-spacing: 0.02em;
     border-radius: 2px;
-    border: 1px solid #1E2D3D;
-    color: #7A9BB5;
-    background: transparent;
-    transition: all 0.15s;
+    border: 1px solid #2A2E39;
+    color: #D1D4DC;
+    background: #1E222D;
+    transition: all 0.12s;
 }
-.stButton > button:hover  { border-color: #00D4FF; color: #00D4FF; background: rgba(0,212,255,0.05); }
-.stButton > button[kind="primary"]       { border-color: #00D4FF; color: #00D4FF; background: rgba(0,212,255,0.07); }
-.stButton > button[kind="primary"]:hover { background: rgba(0,212,255,0.14); }
+.stButton > button:hover {
+    border-color: #2196F3;
+    color: #2196F3;
+    background: rgba(33,150,243,0.06);
+}
+.stButton > button[kind="primary"] {
+    border-color: #2196F3;
+    color: #131722;
+    background: #2196F3;
+    font-weight: 600;
+}
+.stButton > button[kind="primary"]:hover {
+    background: #1976D2;
+    border-color: #1976D2;
+}
 
 /* ── Text inputs ─────────────────────────────────────── */
 .stTextInput input, .stTextArea textarea {
-    background: #0D1117;
-    border: 1px solid #1E2D3D;
+    background: #1E222D;
+    border: 1px solid #2A2E39;
     border-radius: 2px;
-    color: #E8F4FD;
-    font-family: 'IBM Plex Mono', monospace;
+    color: #D1D4DC;
+    font-family: 'Roboto Mono', monospace;
     font-size: 0.82rem;
 }
 .stTextInput input:focus, .stTextArea textarea:focus {
-    border-color: #00D4FF !important;
-    box-shadow: 0 0 0 1px rgba(0,212,255,0.15);
+    border-color: #2196F3 !important;
+    box-shadow: 0 0 0 1px rgba(33,150,243,0.15);
 }
 .stTextInput label, .stTextArea label, .stSelectbox label,
 .stSlider label, .stDateInput label, .stNumberInput label {
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 0.58rem !important;
-    letter-spacing: 0.18em;
+    font-family: 'Roboto Mono', monospace !important;
+    font-size: 0.57rem !important;
+    letter-spacing: 0.15em;
     text-transform: uppercase;
-    color: #7A9BB5 !important;
+    color: #787B86 !important;
 }
 
 /* ── Selectbox ───────────────────────────────────────── */
 [data-baseweb="select"] > div:first-child {
-    background: #0D1117;
-    border-color: #1E2D3D;
-    color: #E8F4FD;
-    font-family: 'IBM Plex Mono', monospace;
+    background: #1E222D;
+    border-color: #2A2E39;
+    color: #D1D4DC;
+    font-family: 'Roboto Mono', monospace;
     font-size: 0.78rem;
     border-radius: 2px;
 }
 
-/* ── Divider / separator ─────────────────────────────── */
-hr { border-color: #1E2D3D; margin: 1.5rem 0; }
+/* ── Slider ──────────────────────────────────────────── */
+[data-testid="stSlider"] [data-baseweb="slider"] div[role="slider"] {
+    background: #2196F3;
+    border-color: #2196F3;
+}
+[data-testid="stSlider"] [data-baseweb="slider"] div[data-testid="stTickBar"] {
+    color: #787B86;
+    font-family: 'Roboto Mono', monospace;
+    font-size: 0.6rem;
+}
+
+/* ── Divider ─────────────────────────────────────────── */
+hr { border-color: #2A2E39; margin: 1.25rem 0; }
 
 /* ── Expander ────────────────────────────────────────── */
 [data-testid="stExpander"] summary {
-    font-family: 'IBM Plex Mono', monospace;
+    font-family: 'Roboto Mono', monospace;
     font-size: 0.62rem;
-    letter-spacing: 0.15em;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
-    color: #7A9BB5;
+    color: #787B86;
+    background: #1E222D;
+    border: 1px solid #2A2E39;
+    border-radius: 2px;
+    padding: 0.6rem 0.875rem;
 }
 [data-testid="stExpander"] > div {
-    border-color: #1E2D3D;
+    border-color: #2A2E39;
     background: transparent;
 }
 
 /* ── Alerts ──────────────────────────────────────────── */
-.stAlert { border-radius: 2px; }
-.stAlert p { font-family: 'IBM Plex Sans', sans-serif; font-size: 0.82rem; }
+.stAlert {
+    border-radius: 2px;
+    background: #1E222D !important;
+    border: 1px solid #2A2E39 !important;
+}
+.stAlert p {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.82rem;
+    color: #D1D4DC;
+}
+[data-testid="stNotification"] { border-left-width: 3px !important; }
+
+/* ── Success / Info / Warning colors ────────────────── */
+.stSuccess { border-left-color: #26A69A !important; }
+.stInfo    { border-left-color: #2196F3 !important; }
+.stWarning { border-left-color: #F7A600 !important; }
+.stError   { border-left-color: #EF5350 !important; }
 
 /* ── Progress bar ────────────────────────────────────── */
-[data-testid="stProgress"] > div > div { background: #00D4FF; }
+[data-testid="stProgress"] > div > div { background: #2196F3; }
 
 /* ── Chat ────────────────────────────────────────────── */
 [data-testid="stChatInput"] textarea {
-    background: #0D1117;
-    border: 1px solid #1E2D3D;
-    color: #E8F4FD;
-    font-family: 'IBM Plex Mono', monospace;
+    background: #1E222D;
+    border: 1px solid #2A2E39;
+    color: #D1D4DC;
+    font-family: 'Roboto Mono', monospace;
     font-size: 0.82rem;
 }
-[data-testid="stChatMessageContent"] p { font-family: 'IBM Plex Sans', sans-serif; font-size: 0.85rem; }
+[data-testid="stChatMessageContent"] p {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.85rem;
+}
 
 /* ── Dataframe ───────────────────────────────────────── */
-[data-testid="stDataFrame"] { border: 1px solid #1E2D3D; border-radius: 2px; }
+[data-testid="stDataFrame"] {
+    border: 1px solid #2A2E39;
+    border-radius: 2px;
+}
+[data-testid="stDataFrame"] table {
+    font-family: 'Roboto Mono', monospace;
+    font-size: 0.78rem;
+}
+[data-testid="stDataFrame"] th {
+    background: #1E222D !important;
+    color: #787B86 !important;
+    font-size: 0.57rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    border-bottom: 1px solid #2A2E39 !important;
+    font-weight: 400;
+}
+[data-testid="stDataFrame"] td {
+    color: #D1D4DC;
+    border-bottom: 1px solid #2A2E39 !important;
+    background: transparent !important;
+}
 
 /* ── Spinner ─────────────────────────────────────────── */
-.stSpinner > div { border-top-color: #00D4FF !important; }
+.stSpinner > div { border-top-color: #2196F3 !important; }
+
+/* ── Sidebar nav items ───────────────────────────────── */
+section[data-testid="stSidebar"] a {
+    font-family: 'Inter', sans-serif;
+    font-size: 0.82rem;
+    color: #787B86;
+}
+section[data-testid="stSidebar"] a:hover { color: #D1D4DC; }
 """
 
 
@@ -147,20 +249,20 @@ def inject_css():
     st.markdown(f"<style>{_CSS}</style>", unsafe_allow_html=True)
 
 
-def page_header(label: str, title: str, accent: str = "#00D4FF"):
+def page_header(label: str, title: str, accent: str = "#2196F3"):
     st.markdown(f"""
-    <div style="border-bottom:1px solid #1E2D3D;padding-bottom:1rem;margin-bottom:1.75rem;">
-        <span style="font-family:'IBM Plex Mono',monospace;font-size:0.58rem;letter-spacing:0.22em;
+    <div style="border-bottom:1px solid #2A2E39;padding-bottom:0.875rem;margin-bottom:1.5rem;">
+        <span style="font-family:'Roboto Mono',monospace;font-size:0.57rem;letter-spacing:0.18em;
         color:{accent};text-transform:uppercase;">{label}</span>
-        <h1 style="font-family:'IBM Plex Mono',monospace;font-size:1.4rem;font-weight:400;
-        color:#E8F4FD;margin:0.3rem 0 0 0;letter-spacing:-0.01em;">{title}</h1>
+        <h1 style="font-family:'Inter',sans-serif;font-size:1.35rem;font-weight:500;
+        color:#D1D4DC;margin:0.25rem 0 0 0;letter-spacing:-0.02em;">{title}</h1>
     </div>
     """, unsafe_allow_html=True)
 
 
-def section_label(text: str, color: str = "#7A9BB5"):
+def section_label(text: str, color: str = "#787B86"):
     st.markdown(
-        f'<div style="font-family:IBM Plex Mono,monospace;font-size:0.6rem;letter-spacing:0.18em;'
-        f'text-transform:uppercase;color:{color};margin:1rem 0 0.5rem 0;">▸ {text}</div>',
+        f'<div style="font-family:Roboto Mono,monospace;font-size:0.57rem;letter-spacing:0.15em;'
+        f'text-transform:uppercase;color:{color};margin:1rem 0 0.4rem 0;border-left:2px solid {color};padding-left:0.5rem;">{text}</div>',
         unsafe_allow_html=True,
     )

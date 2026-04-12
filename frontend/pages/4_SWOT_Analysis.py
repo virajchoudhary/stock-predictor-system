@@ -34,83 +34,82 @@ st.set_page_config(
 # ═══════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Roboto+Mono:wght@300;400;500&display=swap');
 html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
 /* ── quadrant cards ─────────────────────────────── */
 .swot-card {
-    border-radius: 16px;
-    padding: 22px 24px;
-    min-height: 260px;
-    box-shadow: 0 6px 30px rgba(0,0,0,0.35);
-    transition: transform 0.25s, box-shadow 0.25s;
+    border-radius: 2px;
+    padding: 18px 20px;
+    min-height: 240px;
+    background: #1E222D;
 }
-.swot-card:hover { transform:translateY(-3px); box-shadow:0 10px 40px rgba(0,0,0,0.5); }
 
-.swot-S  { background: linear-gradient(145deg,#0a1f0f,#0d2f18); border:1px solid #2a6b3a; }
-.swot-W  { background: linear-gradient(145deg,#1f1505,#2d1e07); border:1px solid #7a5c1e; }
-.swot-O  { background: linear-gradient(145deg,#040f1f,#081a35); border:1px solid #1a4a8a; }
-.swot-T  { background: linear-gradient(145deg,#1f0507,#350a0d); border:1px solid #8a1a1f; }
+.swot-S  { border: 1px solid #2A2E39; border-top: 2px solid #26A69A; }
+.swot-W  { border: 1px solid #2A2E39; border-top: 2px solid #F7A600; }
+.swot-O  { border: 1px solid #2A2E39; border-top: 2px solid #2196F3; }
+.swot-T  { border: 1px solid #2A2E39; border-top: 2px solid #EF5350; }
 
-.swot-header { font-size:1.15rem; font-weight:800; margin-bottom:14px; letter-spacing:0.5px; }
-.swot-S .swot-header { color:#4ade80; }
-.swot-W .swot-header { color:#fbbf24; }
-.swot-O .swot-header { color:#60a5fa; }
-.swot-T .swot-header { color:#f87171; }
+.swot-header { font-family:'Roboto Mono',monospace; font-size:0.6rem; font-weight:500; margin-bottom:12px; letter-spacing:0.15em; text-transform:uppercase; }
+.swot-S .swot-header { color:#26A69A; }
+.swot-W .swot-header { color:#F7A600; }
+.swot-O .swot-header { color:#2196F3; }
+.swot-T .swot-header { color:#EF5350; }
 
 .swot-point {
-    padding: 10px 12px;
-    border-radius: 9px;
-    margin-bottom: 10px;
-    font-size: 0.875rem;
-    line-height: 1.55;
+    padding: 8px 10px;
+    border-radius: 2px;
+    margin-bottom: 8px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    background: rgba(255,255,255,0.03);
 }
-.swot-S .swot-point { background:rgba(74,222,128,0.07); border-left:3px solid #4ade80; color:#dcfce7; }
-.swot-W .swot-point { background:rgba(251,191,36,0.07); border-left:3px solid #fbbf24; color:#fef3c7; }
-.swot-O .swot-point { background:rgba(96,165,250,0.07); border-left:3px solid #60a5fa; color:#dbeafe; }
-.swot-T .swot-point { background:rgba(248,113,113,0.07); border-left:3px solid #f87171; color:#fee2e2; }
+.swot-S .swot-point { border-left:2px solid #26A69A; color:#D1D4DC; }
+.swot-W .swot-point { border-left:2px solid #F7A600; color:#D1D4DC; }
+.swot-O .swot-point { border-left:2px solid #2196F3; color:#D1D4DC; }
+.swot-T .swot-point { border-left:2px solid #EF5350; color:#D1D4DC; }
 
-.swot-evidence { font-size:0.75rem; color:#94a3b8; margin-top:4px; font-style:italic; }
-.swot-source   { font-size:0.7rem; color:#64748b; margin-top:2px; }
+.swot-evidence { font-size:0.72rem; color:#787B86; margin-top:3px; }
+.swot-source   { font-size:0.68rem; color:#787B86; margin-top:2px; }
 
 /* ── rating badge ───────────────────────────────── */
-.rating-sb  { background:#052e16;color:#4ade80;padding:8px 22px;border-radius:10px;font-weight:800;font-size:1.1rem;border:1px solid #4ade80;display:inline-block; }
-.rating-b   { background:#0a2215;color:#86efac;padding:8px 22px;border-radius:10px;font-weight:800;font-size:1.1rem;border:1px solid #86efac;display:inline-block; }
-.rating-h   { background:#1c1407;color:#fbbf24;padding:8px 22px;border-radius:10px;font-weight:800;font-size:1.1rem;border:1px solid #fbbf24;display:inline-block; }
-.rating-s   { background:#2d0a0c;color:#f87171;padding:8px 22px;border-radius:10px;font-weight:800;font-size:1.1rem;border:1px solid #f87171;display:inline-block; }
-.rating-ss  { background:#1a0507;color:#ef4444;padding:8px 22px;border-radius:10px;font-weight:800;font-size:1.1rem;border:1px solid #ef4444;display:inline-block; }
+.rating-sb  { background:#1E222D;color:#26A69A;padding:6px 18px;border-radius:2px;font-weight:600;font-size:0.85rem;border:1px solid #26A69A;display:inline-block;font-family:'Roboto Mono',monospace; }
+.rating-b   { background:#1E222D;color:#26A69A;padding:6px 18px;border-radius:2px;font-weight:600;font-size:0.85rem;border:1px solid #26A69A;display:inline-block;font-family:'Roboto Mono',monospace; }
+.rating-h   { background:#1E222D;color:#F7A600;padding:6px 18px;border-radius:2px;font-weight:600;font-size:0.85rem;border:1px solid #F7A600;display:inline-block;font-family:'Roboto Mono',monospace; }
+.rating-s   { background:#1E222D;color:#EF5350;padding:6px 18px;border-radius:2px;font-weight:600;font-size:0.85rem;border:1px solid #EF5350;display:inline-block;font-family:'Roboto Mono',monospace; }
+.rating-ss  { background:#1E222D;color:#EF5350;padding:6px 18px;border-radius:2px;font-weight:600;font-size:0.85rem;border:1px solid #EF5350;display:inline-block;font-family:'Roboto Mono',monospace; }
 
 /* ── metric cards ───────────────────────────────── */
 div[data-testid="stMetric"] {
-    background:linear-gradient(135deg,#0d1117,#161b22);
-    border:1px solid #21262d; border-radius:12px;
-    padding:16px 20px; box-shadow:0 4px 18px rgba(0,0,0,0.35);
+    background: #1E222D;
+    border: 1px solid #2A2E39;
+    border-radius: 2px;
+    padding: 14px 18px;
 }
-div[data-testid="stMetric"] label { color:#8b949e!important; font-size:0.75rem!important; letter-spacing:0.5px; text-transform:uppercase; }
-div[data-testid="stMetric"] [data-testid="stMetricValue"] { color:#e6edf3!important; font-weight:700!important; }
+div[data-testid="stMetric"] label { color:#787B86!important; font-size:0.57rem!important; letter-spacing:0.15em; text-transform:uppercase; font-family:'Roboto Mono',monospace!important; }
+div[data-testid="stMetric"] [data-testid="stMetricValue"] { color:#D1D4DC!important; font-weight:500!important; }
 
 /* ── news card ──────────────────────────────────── */
 .news-card {
-    background:#0d1117; border:1px solid #21262d; border-radius:10px;
-    padding:14px 16px; margin-bottom:10px;
-    transition: border-color 0.2s;
+    background:#1E222D; border:1px solid #2A2E39; border-radius:2px;
+    padding:12px 14px; margin-bottom:8px;
 }
-.news-card:hover { border-color:#388bfd44; }
-.news-title { font-size:0.9rem; font-weight:600; color:#e6edf3; }
-.news-meta  { font-size:0.74rem; color:#8b949e; margin-top:4px; }
-.news-summary { font-size:0.8rem; color:#64748b; margin-top:5px; }
+.news-card:hover { border-color:#2196F3; }
+.news-title { font-size:0.85rem; font-weight:500; color:#D1D4DC; }
+.news-meta  { font-size:0.72rem; color:#787B86; margin-top:3px; font-family:'Roboto Mono',monospace; }
+.news-summary { font-size:0.78rem; color:#787B86; margin-top:4px; }
 
 /* ── section title ──────────────────────────────── */
-.sec-title { font-size:1rem; font-weight:700; color:#e6edf3; border-left:3px solid #388bfd; padding-left:10px; margin:20px 0 12px 0; }
+.sec-title { font-family:'Roboto Mono',monospace; font-size:0.57rem; font-weight:400; color:#787B86; border-left:2px solid #2196F3; padding-left:8px; margin:16px 0 10px 0; letter-spacing:0.15em; text-transform:uppercase; }
 
 /* ── peer table ─────────────────────────────────── */
-.stDataFrame { border-radius:10px; overflow:hidden; }
+.stDataFrame { border-radius:2px; overflow:hidden; }
 
 /* ── executive box ──────────────────────────────── */
 .exec-box {
-    background:linear-gradient(135deg,#040d1a,#071527);
-    border:1px solid #1a3a5c; border-radius:14px;
-    padding:20px 24px; margin:12px 0;
+    background: #1E222D;
+    border: 1px solid #2A2E39; border-radius:2px;
+    padding:16px 20px; margin:10px 0;
 }
 .exec-text { color:#93c5fd; font-size:1rem; line-height:1.7; }
 
@@ -238,16 +237,14 @@ def render_fundamentals_grid(fund: dict, pm: dict):
 # PAGE HEADER
 # ═══════════════════════════════════════════════════════════════════════
 st.markdown("""
-<div style="padding:0 0 6px 0;">
-<h1 style="
-    background:linear-gradient(90deg,#4ade80,#60a5fa,#f59e0b,#f87171);
-    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-    font-weight:900; font-size:2.1rem; margin:0; letter-spacing:-0.5px;">
-    SWOT Intelligence Engine
-</h1>
-<p style="color:#8b949e; margin:4px 0 0 0; font-size:0.95rem;">
-    Real-time data · Groq LLM synthesis · India (NSE/BSE ₹) &amp; US (NYSE/NASDAQ $)
-</p>
+<div style="border-bottom:1px solid #2A2E39;padding-bottom:0.875rem;margin-bottom:1.5rem;">
+    <span style="font-family:'Roboto Mono',monospace;font-size:0.57rem;letter-spacing:0.18em;
+    color:#26A69A;text-transform:uppercase;">Fundamental Research</span>
+    <h1 style="font-family:'Inter',sans-serif;font-size:1.35rem;font-weight:500;
+    color:#D1D4DC;margin:0.25rem 0 0 0;letter-spacing:-0.02em;">SWOT Analysis</h1>
+    <p style="font-family:'Inter',sans-serif;color:#787B86;margin:0.35rem 0 0 0;font-size:0.82rem;">
+        Real-time data &nbsp;&middot;&nbsp; LLM synthesis &nbsp;&middot;&nbsp; India (NSE/BSE) &amp; US (NYSE/NASDAQ)
+    </p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -423,13 +420,7 @@ Generated: {generated_at}
 
     # ── SWOT QUADRANTS ────────────────────────────────────────────────
     st.divider()
-    st.markdown("""
-    <h2 style="background:linear-gradient(90deg,#4ade80,#60a5fa,#f59e0b,#f87171);
-               -webkit-background-clip:text;-webkit-text-fill-color:transparent;
-               font-weight:900;font-size:1.6rem;margin:0 0 16px 0;">
-        SWOT Analysis
-    </h2>
-    """, unsafe_allow_html=True)
+    st.markdown('<div class="sec-title">SWOT Quadrants</div>', unsafe_allow_html=True)
 
     if "error" in swot:
         st.error(f"SWOT generation error: {swot['error']}")
@@ -516,15 +507,13 @@ and use Groq AI (Llama 3.3 70B) to synthesize a professional SWOT analysis.
 </div>
 </div>""", unsafe_allow_html=True)
     placeholder_cols = st.columns(4)
-    placeholder_tickers = [
-        ("RELIANCE.NS", "🇮🇳"), ("TCS.NS", "🇮🇳"), ("AAPL", "🇺🇸"), ("NVDA", "🇺🇸"),
-    ]
-    for i, (pticker, pflag) in enumerate(placeholder_tickers):
+    placeholder_tickers = ["RELIANCE.NS", "TCS.NS", "AAPL", "NVDA"]
+    for i, pticker in enumerate(placeholder_tickers):
         with placeholder_cols[i]:
-            if st.button(f"{pflag} {pticker}", key=f"ph_{pticker}", width='stretch'):
-                st.session_state["swot_prefill"] = pticker
-                st.session_state["swot_auto_run"] = True
-                st.rerun()
+            if st.button(pticker, key=f"ph_{pticker}", width='stretch'):
+                    st.session_state["swot_prefill"] = pticker
+                    st.session_state["swot_auto_run"] = True
+                    st.rerun()
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────
 with st.sidebar:

@@ -334,17 +334,15 @@ def fetch_us_options(symbol: str):
 # PAGE HEADER
 # ═══════════════════════════════════════════════════════════════════════
 st.markdown("""
-<div style="padding:0 0 8px 0;">
-<h1 style="
-    background: linear-gradient(90deg,#58a6ff,#bc8cff,#3fb950);
-    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-    font-weight:900; font-size:2.2rem; margin:0; letter-spacing:-0.5px;">
-    Black–Scholes Options Analyzer
-</h1>
-<p style="color:#8b949e; margin:4px 0 0 0; font-size:1rem;">
-    India (NSE/BSE · ₹) &amp; US (NYSE/NASDAQ · $) &nbsp;·&nbsp;
-    B-S Pricing · Greeks · Implied Vol · Confidence Signals
-</p>
+<div style="border-bottom:1px solid #2A2E39;padding-bottom:0.875rem;margin-bottom:1.5rem;">
+    <span style="font-family:'Roboto Mono',monospace;font-size:0.57rem;letter-spacing:0.18em;
+    color:#2196F3;text-transform:uppercase;">Derivatives Research</span>
+    <h1 style="font-family:'Inter',sans-serif;font-size:1.35rem;font-weight:500;
+    color:#D1D4DC;margin:0.25rem 0 0 0;letter-spacing:-0.02em;">Black-Scholes Options Analyzer</h1>
+    <p style="font-family:'Inter',sans-serif;color:#787B86;margin:0.35rem 0 0 0;font-size:0.82rem;">
+        India (NSE/BSE) &amp; US (NYSE/NASDAQ) &nbsp;&mdash;&nbsp;
+        B-S Pricing &nbsp;&middot;&nbsp; Greeks &nbsp;&middot;&nbsp; Implied Vol &nbsp;&middot;&nbsp; Confidence Signals
+    </p>
 </div>
 """, unsafe_allow_html=True)
 

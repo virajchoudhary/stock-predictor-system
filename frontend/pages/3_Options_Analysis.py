@@ -316,18 +316,19 @@ with tab_rl_blend:
     st.caption("Train A2C · SAC · TD3 agents on your option underlyings and blend their allocations into a final weight.")
 
     SPEED_MAP = {"Fast (5k)": 5000, "Medium (20k)": 20000, "Thorough (50k)": 50000}
-    COLORS    = ["#00D4FF", "#00FF94", "#FFB800", "#FF4466", "#BF7FFF", "#FF8C00"]
+    COLORS    = ["#2196F3", "#26A69A", "#F7A600", "#EF5350", "#9C27B0", "#FF6D00"]
 
     def _donut(alloc, centre):
         fig = go.Figure(data=[go.Pie(
             labels=list(alloc.keys()), values=list(alloc.values()), hole=0.55,
-            marker=dict(colors=COLORS[:len(alloc)], line=dict(color="#080C10", width=2)),
+            marker=dict(colors=COLORS[:len(alloc)], line=dict(color="#131722", width=2)),
             textfont=dict(size=11),
         )])
         fig.update_layout(
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             margin=dict(t=10, b=10, l=10, r=10),
-            annotations=[dict(text=centre, x=0.5, y=0.5, font_size=14, showarrow=False)],
+            showlegend=True,
+            annotations=[dict(text=centre, x=0.5, y=0.5, font=dict(size=13, color="#D1D4DC"), showarrow=False)],
         )
         return fig
 
@@ -371,7 +372,8 @@ with tab_rl_blend:
     st.caption(f"{quant_pct}% Quant (Min-Vol)  +  {rl_pct}% RL Ensemble (A2C · SAC · TD3)")
 
     for k, v in [("rl_alloc_quant", None), ("rl_alloc_rl", None),
-                 ("rl_alloc_blend", None), ("rl_session", str(uuid.uuid4())[:8])]:
+                 ("rl_alloc_blend", None), ("rl_session", str(uuid.uuid4())[:8]),
+                 ("rl_training_attempted", False)]:
         if k not in st.session_state:
             st.session_state[k] = v
 
@@ -403,6 +405,7 @@ with tab_rl_blend:
 
             # Step 2 — RL Ensemble (async train + poll)
             if rl_blend > 0:
+                st.session_state.rl_training_attempted = True
                 st.markdown("**Step 2 — Training RL Ensemble (A2C · SAC · TD3)**")
                 pb   = st.progress(0)
                 stxt = st.empty()
@@ -422,7 +425,7 @@ with tab_rl_blend:
                                 pct    = prog.get("progress", 0)
                                 status = prog.get("status", "")
                                 pb.progress(int(min(pct, 100)))
-                                stxt.caption(f"▸ {LABELS.get(status, status)}  {pct:.0f}%")
+                                stxt.caption(f"{LABELS.get(status, status)}  {pct:.0f}%")
                                 if status == "error":
                                     st.error(prog.get("error", "Unknown error"))
                                     break
@@ -457,7 +460,7 @@ with tab_rl_blend:
         r     = st.session_state.rl_alloc_rl    or {}
         blend = st.session_state.rl_alloc_blend
 
-        st.success("▸ BLENDED ALLOCATION READY")
+        st.success("BLENDED ALLOCATION READY")
         c1, c2, c3 = st.columns(3)
         with c1:
             st.caption(f"Quant (Min-Vol) — {quant_pct}%")
@@ -466,8 +469,10 @@ with tab_rl_blend:
             st.caption(f"RL Ensemble — {rl_pct}%")
             if r:
                 st.plotly_chart(_donut(r, "ENS"), width='stretch')
+            elif rl_pct == 0:
+                st.info("RL weight set to 0% — increase the blend slider to include RL.")
             else:
-                st.info("Blend set to 0% — RL not trained")
+                st.info(f"RL Ensemble ({rl_pct}%) — training not yet complete. Click **Train and Blend** to run.")
         with c3:
             st.caption(f"Final Blend — {quant_pct}% + {rl_pct}%")
             st.plotly_chart(_donut(blend, "MIX"), width='stretch')
