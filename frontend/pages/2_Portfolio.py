@@ -99,7 +99,7 @@ except Exception:
 # Configuration
 API_URL = "http://127.0.0.1:8000/api"
 
-st.set_page_config(page_title="Portfolio - QuantVision", layout="wide")
+st.set_page_config(page_title="Portfolio - Stock Price Predictor", layout="wide")
 
 st.title("Portfolio Manager")
 
@@ -518,11 +518,11 @@ def _response_error_message(response):
     return payload.get("error") or f"Request returned {response.status_code}"
 
 
-def _request_bl_allocation(tickers):
+def _request_bl_allocation(tickers, risk_tolerance):
     try:
         response = requests.post(
             f"{API_URL}/bl-optimize/",
-            json={"tickers": tickers},
+            json={"tickers": tickers, "risk_tolerance": risk_tolerance},
             timeout=45,
         )
         if response.status_code != 200:
@@ -551,7 +551,7 @@ def _request_risk_allocation(tickers, risk_tolerance):
 
 
 def _fetch_auto_allocation(tickers, risk_tolerance):
-    bl_result, bl_error = _request_bl_allocation(tickers)
+    bl_result, bl_error = _request_bl_allocation(tickers, risk_tolerance)
     if bl_result and bl_result.get("allocation"):
         bl_result["method"] = "bl"
         bl_result["bl_unavailable_reason"] = None

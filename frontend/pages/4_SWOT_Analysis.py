@@ -1,6 +1,6 @@
 """
-SWOT Analysis — QuantVision
-============================
+SWOT Analysis - Stock Price Predictor
+=====================================
 Real-time, data-driven SWOT analysis for Indian and US stocks.
 Fetches live fundamentals, news, and peer data → Groq LLM synthesis.
 """
@@ -24,7 +24,7 @@ API_URL = "http://127.0.0.1:8000/api"
 
 # ── page config ────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="SWOT Analysis — QuantVision",
+    page_title="SWOT Analysis - Stock Price Predictor",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -139,8 +139,8 @@ def rating_badge(rating: str) -> str:
 
 
 def flag_chip(flag: str) -> str:
-    mapping = {"GREEN": ("flag-green", "✓ Strength"), "ORANGE": ("flag-orange", "⚠ Caution"),
-               "BLUE": ("flag-blue", "✦ Opportunity"), "RED": ("flag-red", "⚡ Risk")}
+    mapping = {"GREEN": ("flag-green", "Strength"), "ORANGE": ("flag-orange", "Caution"),
+               "BLUE": ("flag-blue", "Opportunity"), "RED": ("flag-red", "Risk")}
     cls, label = mapping.get(flag.upper(), ("flag-blue", flag))
     return f'<span class="{cls}">{label}</span>'
 
@@ -157,13 +157,14 @@ def render_swot_card(quadrant_key: str, title: str, emoji: str, points: list):
         chip = flag_chip(flag) if flag else ""
         points_html += f"""<div class="swot-point">
 <strong>{point}</strong>{chip}
-{f'<div class="swot-evidence">📊 {evidence}</div>' if evidence else ''}
-{f'<div class="swot-source">📎 Source: {source}</div>' if source else ''}
+{f'<div class="swot-evidence">Evidence: {evidence}</div>' if evidence else ''}
+{f'<div class="swot-source">Source: {source}</div>' if source else ''}
 </div>
 """
 
+    prefix = f"{emoji} " if emoji else ""
     st.markdown(f"""<div class="swot-card {css_cls}">
-<div class="swot-header">{emoji} {title}</div>
+<div class="swot-header">{prefix}{title}</div>
 {points_html}
 </div>""", unsafe_allow_html=True)
 
@@ -266,12 +267,12 @@ with col_ex:
     st.markdown('<div class="sec-title">Quick Examples</div>', unsafe_allow_html=True)
     ex_cols = st.columns(3)
     examples = [
-        ("🇮🇳 Reliance", "RELIANCE.NS"),
-        ("🇮🇳 TCS", "TCS.NS"),
-        ("🇮🇳 HDFC Bank", "HDFCBANK.NS"),
-        ("🇺🇸 Apple", "AAPL"),
-        ("🇺🇸 Nvidia", "NVDA"),
-        ("🇺🇸 Tesla", "TSLA"),
+        ("Reliance", "RELIANCE.NS"),
+        ("TCS", "TCS.NS"),
+        ("HDFC Bank", "HDFCBANK.NS"),
+        ("Apple", "AAPL"),
+        ("Nvidia", "NVDA"),
+        ("Tesla", "TSLA"),
     ]
     for i, (label, ticker) in enumerate(examples):
         with ex_cols[i % 3]:
@@ -290,7 +291,7 @@ with col_inp:
     )
     st.caption("Supports: Indian companies (NSE/BSE) and US stocks. Enter name or ticker symbol.")
 
-run_clicked = st.button("🧠 Generate SWOT Analysis", type="primary",
+run_clicked = st.button("Generate SWOT Analysis", type="primary",
                          use_container_width=True, key="swot_run")
 
 # ── Session state for caching results ────────────────────────────────
@@ -301,7 +302,7 @@ if "swot_result" not in st.session_state:
 # ANALYSIS EXECUTION
 # ═══════════════════════════════════════════════════════════════════════
 if run_clicked and company_query.strip():
-    with st.spinner(f"🔍 Fetching real-time data for **{company_query}** …  "
+    with st.spinner(f"Fetching real-time data for **{company_query}** ...  "
                     "*(Collecting fundamentals, news, peers → Groq LLM synthesis)*"):
         try:
             resp = http_requests.post(
@@ -355,7 +356,7 @@ if data and "error" not in data:
     # ── COMPANY HEADER ────────────────────────────────────────────────
     h1, h2, h3 = st.columns([3, 1.5, 1.5])
     with h1:
-        mkt_flag = "🇮🇳 NSE/BSE · ₹" if market == "IN" else "🇺🇸 NYSE/NASDAQ · $"
+        mkt_flag = "NSE/BSE · ₹" if market == "IN" else "NYSE/NASDAQ · $"
         st.markdown(f"""<div style="padding:16px 20px; background:#0d1117; border:1px solid #21262d; border-radius:12px;">
 <div style="font-size:1.5rem;font-weight:800;color:#e6edf3;">{company_name}</div>
 <div style="color:#8b949e;font-size:0.88rem;margin-top:4px;">
@@ -397,9 +398,9 @@ Generated: {generated_at}
                             swot["executive_summary"] + '</div></div>', unsafe_allow_html=True)
         with r3:
             if swot.get("key_risk"):
-                st.error(f"⚡ Key Risk: {swot['key_risk']}")
+                st.error(f"Key Risk: {swot['key_risk']}")
             if swot.get("key_opportunity"):
-                st.success(f"✦ Key Opportunity: {swot['key_opportunity']}")
+                st.success(f"Key Opportunity: {swot['key_opportunity']}")
 
     # ── FUNDAMENTALS GRID ─────────────────────────────────────────────
     st.divider()
@@ -430,13 +431,13 @@ Generated: {generated_at}
     else:
         sw1, sw2 = st.columns(2, gap="large")
         with sw1:
-            render_swot_card("S", "STRENGTHS", "💪", swot.get("strengths", []))
+            render_swot_card("S", "STRENGTHS", "", swot.get("strengths", []))
             st.markdown("<br>", unsafe_allow_html=True)
-            render_swot_card("O", "OPPORTUNITIES", "🚀", swot.get("opportunities", []))
+            render_swot_card("O", "OPPORTUNITIES", "", swot.get("opportunities", []))
         with sw2:
-            render_swot_card("W", "WEAKNESSES", "⚠️", swot.get("weaknesses", []))
+            render_swot_card("W", "WEAKNESSES", "", swot.get("weaknesses", []))
             st.markdown("<br>", unsafe_allow_html=True)
-            render_swot_card("T", "THREATS", "⚡", swot.get("threats", []))
+            render_swot_card("T", "THREATS", "", swot.get("threats", []))
 
     # ── PEER COMPARISON ───────────────────────────────────────────────
     if peers:
@@ -462,14 +463,14 @@ Generated: {generated_at}
 {title}
 </a>
 </div>
-<div class="news-meta">📰 {source} &nbsp;·&nbsp; 🕐 {date}</div>
+<div class="news-meta">{source} &nbsp;·&nbsp; {date}</div>
 {f'<div class="news-summary">{summary}</div>' if summary else ''}
 </div>""", unsafe_allow_html=True)
 
     # ── COMPANY DESCRIPTION ───────────────────────────────────────────
     desc = fund.get("description", "")
     if desc:
-        with st.expander("📖 Company Overview"):
+        with st.expander("Company Overview"):
             st.markdown(f'<p style="color:#94a3b8;line-height:1.8;font-size:0.9rem;">{desc}</p>',
                         unsafe_allow_html=True)
             info_cols = st.columns(3)
@@ -487,7 +488,7 @@ Generated: {generated_at}
     # ── DISCLAIMER ───────────────────────────────────────────────────
     st.divider()
     st.caption(
-        "⚠️ **Disclaimer:** This analysis is generated using real-time market data and AI. "
+        "**Disclaimer:** This analysis is generated using real-time market data and AI. "
         "It is for educational and informational purposes only. "
         "Not financial advice. Always conduct your own due diligence before investing."
     )
@@ -498,7 +499,6 @@ elif data and "error" in data:
 else:
     # ── PLACEHOLDER when nothing has been run ─────────────────────────
     st.markdown("""<div style="text-align:center; padding:60px 20px; color:#484f58;">
-<div style="font-size:3rem;">🔍</div>
 <div style="font-size:1.2rem; color:#6e7681; margin-top:12px; font-weight:600;">
 Enter a company name or ticker and click "Generate SWOT Analysis"
 </div>
@@ -507,35 +507,35 @@ The engine will fetch live financial data, recent news, peer comparisons,
 and use Groq AI (Llama 3.3 70B) to synthesize a professional SWOT analysis.
 </div>
 <div style="margin-top:20px; display:flex; justify-content:center; gap:20px; flex-wrap:wrap;">
-<span style="background:#0d2818;color:#4ade80;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #4ade80;">🇮🇳 RELIANCE.NS</span>
-<span style="background:#0d2818;color:#4ade80;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #4ade80;">🇮🇳 TCS.NS</span>
-<span style="background:#040f1f;color:#60a5fa;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #60a5fa;">🇺🇸 AAPL</span>
-<span style="background:#040f1f;color:#60a5fa;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #60a5fa;">🇺🇸 NVDA</span>
+<span style="background:#0d2818;color:#4ade80;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #4ade80;">RELIANCE.NS</span>
+<span style="background:#0d2818;color:#4ade80;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #4ade80;">TCS.NS</span>
+<span style="background:#040f1f;color:#60a5fa;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #60a5fa;">AAPL</span>
+<span style="background:#040f1f;color:#60a5fa;padding:6px 16px;border-radius:8px;font-size:0.85rem;border:1px solid #60a5fa;">NVDA</span>
 </div>
 </div>""", unsafe_allow_html=True)
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### 📊 Data Sources")
+    st.markdown("### Data Sources")
     st.markdown("""
 **Live Data Feeds:**
-- 📈 yfinance (30+ financial metrics)
-- 📰 Yahoo Finance RSS news feed
-- 🧑‍💼 Analyst recommendations
-- 📊 Peer / competitor data
+- yfinance (30+ financial metrics)
+- Yahoo Finance RSS news feed
+- Analyst recommendations
+- Peer / competitor data
 
 **AI Engine:**
-- 🤖 Groq · Llama 3.3 70B
-- 🧠 Investment-grade prompt
-- 📋 Structured JSON output
+- Groq · Llama 3.3 70B
+- Investment-grade prompt
+- Structured JSON output
 
 ---
 
 **Supported Markets:**
-| | Market | Currency |
-|--|--|--|
-| 🇮🇳 | NSE / BSE | ₹ INR |
-| 🇺🇸 | NYSE / NASDAQ | $ USD |
+| Market | Currency |
+|--|--|
+| NSE / BSE | ₹ INR |
+| NYSE / NASDAQ | $ USD |
 
 ---
 
@@ -553,4 +553,4 @@ US:     AAPL  MSFT
 ```
     """)
     st.divider()
-    st.caption("⚠️ Educational use only. Not financial advice.")
+    st.caption("Educational use only. Not financial advice.")

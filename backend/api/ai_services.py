@@ -74,7 +74,7 @@ class GroqService:
                     {
                         "role": "system",
                         "content": (
-                            "You are a helpful financial assistant for the QuantVision app. "
+                            "You are a helpful financial assistant for the Stock Price Predictor app. "
                             "Use the provided context to answer questions."
                         ),
                     },
@@ -669,6 +669,30 @@ class PortfolioOptimizer:
         return series / total
 
     @staticmethod
+    def _inverse_volatility_weights(volatility_source, tickers):
+        if isinstance(volatility_source, pd.DataFrame):
+            diagonal = pd.Series(
+                np.sqrt(np.clip(np.diag(volatility_source.to_numpy(dtype=float)), 0.0, None)),
+                index=volatility_source.index,
+                dtype=float,
+            )
+        else:
+            diagonal = pd.Series(volatility_source, dtype=float)
+
+        vols = diagonal.reindex(tickers).replace(0, np.nan)
+        inverse = (1.0 / vols).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        return PortfolioOptimizer._normalize_weight_series(inverse, tickers)
+
+    @staticmethod
+    def _positive_return_weights(expected_returns_series, tickers):
+        series = pd.Series(expected_returns_series, dtype=float).reindex(tickers).fillna(0.0)
+        positive = series.clip(lower=0.0)
+        if float(positive.sum()) <= 1e-10:
+            shifted = series - float(series.min()) + 1e-6
+            positive = shifted.clip(lower=0.0)
+        return PortfolioOptimizer._normalize_weight_series(positive, tickers)
+
+    @staticmethod
     def _enforce_min_breadth(weight_series, tickers):
         series = PortfolioOptimizer._normalize_weight_series(weight_series, tickers)
 
@@ -817,28 +841,42 @@ class PortfolioOptimizer:
             cov = risk_models.CovarianceShrinkage(prices).ledoit_wolf()
 
             # Conservative: inverse volatility weighting.
-            vols = daily_returns.std().replace(0, np.nan)
-            conservative = (1.0 / vols).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-            conservative = PortfolioOptimizer._normalize_weight_series(conservative, valid_tickers)
+            conservative = PortfolioOptimizer._inverse_volatility_weights(
+                daily_returns.std(),
+                valid_tickers,
+            )
+            aggressive_fallback = PortfolioOptimizer._positive_return_weights(mu, valid_tickers)
+            fallback_notes = []
+
+            try:
+                ef_max_sharpe = EfficientFrontier(mu, cov, weight_bounds=(0, 1))
+                ef_max_sharpe.max_sharpe(risk_free_rate=0.02)
+                aggressive_solver = PortfolioOptimizer._extract_weight_series(
+                    pd.Series(ef_max_sharpe.clean_weights()),
+                    valid_tickers,
+                )
+                aggressive = PortfolioOptimizer._normalize_weight_series(
+                    aggressive_solver * 0.35 + aggressive_fallback * 0.65,
+                    valid_tickers,
+                )
+            except Exception:
+                aggressive = aggressive_fallback.copy()
+                fallback_notes.append("aggressive profile used positive-return fallback")
 
             # Balanced: minimum volatility portfolio.
-            ef_min_vol = EfficientFrontier(mu, cov, weight_bounds=(0, 1))
-            ef_min_vol.min_volatility()
-            balanced = PortfolioOptimizer._extract_weight_series(
-                pd.Series(ef_min_vol.clean_weights()),
-                valid_tickers,
-            )
-
-            # Aggressive: maximum Sharpe, with a stable fallback.
-            ef_max_sharpe = EfficientFrontier(mu, cov, weight_bounds=(0, 1))
             try:
-                ef_max_sharpe.max_sharpe(risk_free_rate=0.02)
+                ef_min_vol = EfficientFrontier(mu, cov, weight_bounds=(0, 1))
+                ef_min_vol.min_volatility()
+                balanced = PortfolioOptimizer._extract_weight_series(
+                    pd.Series(ef_min_vol.clean_weights()),
+                    valid_tickers,
+                )
             except Exception:
-                ef_max_sharpe.max_quadratic_utility(risk_aversion=0.5)
-            aggressive = PortfolioOptimizer._extract_weight_series(
-                pd.Series(ef_max_sharpe.clean_weights()),
-                valid_tickers,
-            )
+                balanced = PortfolioOptimizer._normalize_weight_series(
+                    (conservative + aggressive) / 2.0,
+                    valid_tickers,
+                )
+                fallback_notes.append("balanced profile used conservative/aggressive blend fallback")
 
             blended, blend_meta = PortfolioOptimizer._blend_profiles(
                 conservative,
@@ -853,7 +891,7 @@ class PortfolioOptimizer:
                 allocation=cleaned,
                 source="risk_based",
                 blend_meta=blend_meta,
-                fallback_reason=None,
+                fallback_reason="; ".join(fallback_notes) or None,
             )
 
         except Exception as exc:

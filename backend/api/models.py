@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.utils import OperationalError, ProgrammingError
 from django.utils import timezone
 from datetime import timedelta
 
@@ -43,17 +44,24 @@ class SearchedTicker(models.Model):
         Upsert ticker into watchlist. Increment count if exists.
         If total tickers exceed 20, drop the least searched.
         """
-        obj, created = cls.objects.get_or_create(symbol=symbol.upper())
-        if not created:
-            obj.search_count += 1
-            obj.save(update_fields=['search_count', 'last_searched'])
-        # Cap at 20 most searched
-        total = cls.objects.count()
-        if total > 20:
-            least = cls.objects.order_by('search_count').first()
-            if least and least.symbol != symbol.upper():
-                least.delete()
+        try:
+            obj, created = cls.objects.get_or_create(symbol=symbol.upper())
+            if not created:
+                obj.search_count += 1
+                obj.save(update_fields=['search_count', 'last_searched'])
+            # Cap at 20 most searched
+            total = cls.objects.count()
+            if total > 20:
+                least = cls.objects.order_by('search_count').first()
+                if least and least.symbol != symbol.upper():
+                    least.delete()
+        except (OperationalError, ProgrammingError):
+            # Search logging is non-critical; prediction requests should still succeed.
+            return
 
     @classmethod
     def get_watchlist(cls):
-        return list(cls.objects.values_list('symbol', flat=True))
+        try:
+            return list(cls.objects.values_list('symbol', flat=True))
+        except (OperationalError, ProgrammingError):
+            return []

@@ -22,22 +22,26 @@ from components.black_scholes_ui import render_black_scholes_analyzer
 API_URL = "http://127.0.0.1:8000/api"
 
 # ---------------------------------------------------------------------------
-# NSE Live Data — jugaad-data (replaces nsepython scraper)
-# nsepython used to scrape NSE's website and gets blocked / breaks constantly.
-# jugaad-data uses NSE's official data endpoints and is actively maintained.
+# Option-chain sourcing
+# Use yfinance where options are available and fall back to a simulated
+# NIFTY-style chain for symbols that do not expose live option chains.
 # ---------------------------------------------------------------------------
-try:
-    from jugaad_data.nse import NSELive
-    _nse = NSELive()
-    JUGAAD_AVAILABLE = True
-except ImportError:
-    JUGAAD_AVAILABLE = False
+nifty_symbols = {"^NSEI", "NIFTY", "NIFTY 50", "NIFTY50"}
+banknifty_symbols = {"^NSEBANK", "BANKNIFTY", "BANK NIFTY"}
+
+
+def _uses_simulated_nse_chain(symbol):
+    upper_symbol = symbol.upper()
+    return (
+        upper_symbol in {s.upper() for s in nifty_symbols | banknifty_symbols}
+        or any(token in upper_symbol for token in ["NSE", ".NS", ".BO", "NIFTY"])
+    )
 
 # ---------------------------------------------------------------------------
 # Page Config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Options Analysis - QuantVis",
+    page_title="Options Analysis - Stock Price Predictor",
     layout="wide",
 )
 
@@ -52,63 +56,19 @@ def fetch_option_chain(symbol):
     """
     Fetch option chain data for a given symbol.
     Priority order:
-      1. jugaad-data  (NIFTY / BANKNIFTY — live NSE data)
-      2. yfinance     (US stocks and ETFs — live/delayed data)
-      3. Simulation   (fallback for NSE when live fetch fails)
+      1. yfinance   (US stocks and ETFs — live/delayed data)
+      2. Simulation (fallback for NSE / unavailable live chains)
     """
 
     # ------------------------------------------------------------------
-    # 1. jugaad-data for NIFTY / BANKNIFTY
-    # ------------------------------------------------------------------
-    nifty_symbols = ["^NSEI", "NIFTY", "NIFTY 50", "NIFTY50"]
-    banknifty_symbols = ["^NSEBANK", "BANKNIFTY", "BANK NIFTY"]
-
-    if JUGAAD_AVAILABLE and symbol.upper() in [s.upper() for s in nifty_symbols + banknifty_symbols]:
-        index_name = "BANKNIFTY" if symbol.upper() in [s.upper() for s in banknifty_symbols] else "NIFTY"
-        try:
-            payload   = _nse.live_option_chain(index_name)
-            records   = payload.get("records", {})
-            spot_price = records.get("underlyingValue", 24000.0)
-            expiry_list = records.get("expiryDates", [])
-
-            if not expiry_list:
-                raise ValueError("No expiry dates returned from NSE.")
-
-            nearest_expiry = expiry_list[0]
-            data_list = []
-
-            for item in records.get("data", []):
-                if item.get("expiryDate") == nearest_expiry and "CE" in item:
-                    ce = item["CE"]
-                    iv_raw = ce.get("impliedVolatility", 0)
-                    data_list.append({
-                        "strike":            ce["strikePrice"],
-                        "lastPrice":         ce["lastPrice"],
-                        # NSE returns IV as percentage (e.g. 15.5 means 15.5%)
-                        "impliedVolatility": iv_raw / 100.0 if iv_raw > 0 else 0.0,
-                        "contractSymbol":    ce.get("identifier", f"CE_{ce['strikePrice']}"),
-                    })
-
-            if data_list:
-                return pd.DataFrame(data_list), float(spot_price), nearest_expiry
-
-        except Exception as e:
-            st.warning(
-                f"jugaad-data live fetch failed for {index_name}: `{e}`. "
-                "Falling back to simulation mode."
-            )
-            # Fall through to simulation below
-
-    # ------------------------------------------------------------------
-    # 2. yfinance for US / global symbols
+    # 1. yfinance for symbols with listed options
     # ------------------------------------------------------------------
     ticker = yf.Ticker(symbol)
     try:
         expirations = ticker.options
 
         if not expirations:
-            # No options data — use simulation for Indian indices
-            if any(x in symbol.upper() for x in ["NSE", ".NS", "NIFTY", "NSEI"]):
+            if _uses_simulated_nse_chain(symbol):
                 return _simulate_nifty_chain(symbol)
             return None, None, None
 
@@ -121,8 +81,7 @@ def fetch_option_chain(symbol):
         return chain.calls, current_price, expiry
 
     except Exception:
-        # Last-resort simulation for NSE
-        if any(x in symbol.upper() for x in ["NSE", ".NS", "NIFTY", "NSEI"]):
+        if _uses_simulated_nse_chain(symbol):
             return _simulate_nifty_chain(symbol)
         return None, None, None
 
@@ -232,16 +191,12 @@ with tab_mispricing:
         symbol = st.text_input(
             "Index / Stock Symbol",
             "SPY",
-            help="US: SPY, AAPL, QQQ  |  India: NIFTY or NIFTY 50 (uses jugaad-data live NSE feed)",
+            help="US: SPY, AAPL, QQQ  |  India: NIFTY or NIFTY 50 (falls back to a simulated NSE chain when live options are unavailable)",
         )
-        if JUGAAD_AVAILABLE:
-            st.caption("jugaad-data installed — NIFTY live data available.")
-        else:
-            st.caption(
-                "jugaad-data not installed. "
-                "Run `pip install jugaad-data` for live NSE options. "
-                "NIFTY will use simulation mode."
-            )
+        st.caption(
+            "US options use yfinance live/delayed chains. "
+            "NIFTY-style symbols fall back to a simulated chain when live options are unavailable."
+        )
 
     if symbol:
         calls_df, spot_price, expiry_date = fetch_option_chain(symbol)
@@ -399,16 +354,16 @@ with tab_rl_blend:
         rl_speed   = st.selectbox("RL TRAINING SPEED", list(SPEED_MAP.keys()), index=0, key="rl_opt_speed")
         rl_ts      = SPEED_MAP[rl_speed]
         hpo_eligible = rl_ts >= 10000
-        use_hpo    = st.toggle("🧬 Evolve Hyperparameters (GA HPO)", value=True,
+        use_hpo    = st.toggle("Evolve Hyperparameters (GA HPO)", value=True,
                                disabled=not hpo_eligible,
                                help="Genetic Algorithm evolves optimal hyperparameters. Requires Medium or Thorough speed.",
                                key="rl_opt_hpo")
         if not hpo_eligible:
-            st.caption("⚠ HPO requires Medium/Thorough speed.")
+            st.caption("HPO requires Medium or Thorough speed.")
         elif use_hpo:
-            st.caption("✔ GA will evolve hyperparameters for A2C · SAC · TD3.")
+            st.caption("GA will evolve hyperparameters for A2C · SAC · TD3.")
         else:
-            st.caption("— Default hyperparameters will be used.")
+            st.caption("Default hyperparameters will be used.")
 
     rl_blend = st.slider("QUANT ← BLEND → RL ENSEMBLE", 0.0, 1.0, 0.5, step=0.05, key="rl_opt_blend")
     quant_pct = round((1 - rl_blend) * 100)
@@ -420,7 +375,7 @@ with tab_rl_blend:
         if k not in st.session_state:
             st.session_state[k] = v
 
-    run_rl = st.button("▶  TRAIN & BLEND", type="primary", key="rl_opt_run")
+    run_rl = st.button("Train and Blend", type="primary", key="rl_opt_run")
 
     if run_rl:
         tickers = [t.strip() for t in rl_tickers_input.split(",") if t.strip()]

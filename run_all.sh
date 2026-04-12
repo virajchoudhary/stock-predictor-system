@@ -32,7 +32,7 @@ launch_mac_terminal() {
   osascript -e "tell application \"Terminal\" to do script \"cd \\\"$REPO_DIR\\\"; printf '\\\\e]1;$title\\\\a'; bash \\\"$script_path\\\"\"" >/dev/null
 }
 
-echo "Starting QuantVis services..."
+echo "Starting Stock Price Predictor services..."
 ensure_redis
 
 if [[ "$(uname -s)" == "Darwin" ]] && command -v osascript >/dev/null 2>&1; then

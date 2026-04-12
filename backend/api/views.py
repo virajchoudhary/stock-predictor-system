@@ -112,6 +112,12 @@ class HPOStatusView(APIView):
 class BLOptimizationView(APIView):
     def post(self, request):
         tickers = request.data.get('tickers', [])
+        try:
+            risk_tolerance = float(request.data.get('risk_tolerance', 0.5))
+        except (TypeError, ValueError):
+            risk_tolerance = 0.5
+        risk_tolerance = max(0.0, min(1.0, risk_tolerance))
+
         if not tickers or len(tickers) < 2:
             return Response(
                 {'error': 'At least 2 tickers required.'},
@@ -126,7 +132,7 @@ class BLOptimizationView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        result = run_black_litterman(tickers)
+        result = run_black_litterman(tickers, risk_tolerance)
 
         if result.get("error"):
             return Response({'error': result["error"]}, status=status.HTTP_400_BAD_REQUEST)
@@ -137,6 +143,7 @@ class BLOptimizationView(APIView):
         allocation in plain English in 3-4 sentences.
 
         Tickers: {tickers}
+        Risk tolerance: {risk_tolerance:.2f} (0=conservative, 1=aggressive)
 
         LSTM-based views (what the AI predicts for each stock):
         {result['view_details']}

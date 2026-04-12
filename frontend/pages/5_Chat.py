@@ -4,7 +4,7 @@ import requests
 # Configuration
 API_URL = "http://127.0.0.1:8000/api"
 
-st.set_page_config(page_title="AI Chat - QuantVision")
+st.set_page_config(page_title="AI Chat - Stock Price Predictor")
 
 st.title("AI Investment Advisor")
 

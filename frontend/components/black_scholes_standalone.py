@@ -30,13 +30,6 @@ from api.black_scholes import (
     confidence_score, analyze_option,
 )
 
-# ── page config ────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="BS Options Analyzer — QuantVision",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
 # ── Custom CSS ────────────────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -117,9 +110,9 @@ def render_signal_badge(signal: str, reasoning: str, deviation: float = 0.0):
 
 def render_market_tag(market: str):
     if market == "IN":
-        st.markdown('<span class="tag-india">🇮🇳 NSE / BSE · INR ₹</span>', unsafe_allow_html=True)
+        st.markdown('<span class="tag-india">NSE / BSE · INR ₹</span>', unsafe_allow_html=True)
     else:
-        st.markdown('<span class="tag-us">🇺🇸 NYSE / NASDAQ · USD $</span>', unsafe_allow_html=True)
+        st.markdown('<span class="tag-us">NYSE / NASDAQ · USD $</span>', unsafe_allow_html=True)
 
 
 def render_confidence(conf: dict):
@@ -361,10 +354,10 @@ st.divider()
 # TABS
 # ═══════════════════════════════════════════════════════════════════════
 tab_manual, tab_live, tab_batch, tab_csv = st.tabs([
-    "📐 Manual Analysis",
-    "📡 Live Market",
-    "📊 Batch (Multi-Stock)",
-    "📄 CSV Upload",
+    "Manual Analysis",
+    "Live Market",
+    "Batch (Multi-Stock)",
+    "CSV Upload",
 ])
 
 
@@ -430,15 +423,15 @@ with tab_manual:
                                  help="Min % mispricing to trigger BUY/SELL")
 
         st.divider()
-        st.markdown('<div class="info-banner">💡 <strong>Auto defaults:</strong><br>'
-                    '🇮🇳 India: r = 6.8% (RBI G-Sec)<br>'
-                    '🇺🇸 US: r = 5.3% (Fed Treasury)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="info-banner"><strong>Auto defaults:</strong><br>'
+                    'India: r = 6.8% (RBI G-Sec)<br>'
+                    'US: r = 5.3% (Fed Treasury)</div>', unsafe_allow_html=True)
 
     m_r = m_r_pct / 100.0
     m_sigma = m_sigma_pct / 100.0
     m_q = m_q_pct / 100.0
 
-    if st.button("⚡ Analyze Option", use_container_width=True, type="primary", key="m_go"):
+    if st.button("Analyze Option", use_container_width=True, type="primary", key="m_go"):
         try:
             result = analyze_option(
                 S=m_S, K=m_K, T=m_T, r=m_r, sigma=m_sigma, q=m_q,
@@ -463,7 +456,7 @@ with tab_manual:
                 st.metric("Implied Volatility", f"{iv*100:.2f}%" if iv else ("—" if m_mkt_price > 0 else "N/A"))
             with vc4:
                 parity = result["put_call_parity"]
-                st.metric("Put-Call Parity", "✓ Holds" if parity["holds"] else "✗ Violated",
+                st.metric("Put-Call Parity", "Holds" if parity["holds"] else "Violated",
                           f"err: {parity['error']:.2e}")
             with vc5:
                 st.metric("Time to Expiry", f"{m_T_days}d", f"= {m_T:.4f} yrs")
@@ -508,7 +501,7 @@ with tab_manual:
                 )
 
             # ── Formula Reference ─────────────────────────────────────
-            with st.expander("📘 Black–Scholes Formulas Reference"):
+            with st.expander("Black–Scholes Formulas Reference"):
                 st.markdown(f"""
 **d₁** = [ ln(S/K) + (r − q + σ²/2)·T ] / (σ·√T)
 &nbsp;&nbsp;→ d₁ = **{result['inputs']['spot_price'] and (math.log(m_S/m_K) + (m_r - m_q + 0.5*m_sigma**2)*m_T) / (m_sigma*math.sqrt(m_T)):.4f}**
@@ -554,7 +547,7 @@ with tab_live:
         live_threshold = st.number_input("Signal Threshold (%)", value=5.0, step=0.5,
                                           key="l_thresh", min_value=1.0)
 
-    if st.button("🔍 Fetch & Analyze", use_container_width=True, type="primary", key="l_go"):
+    if st.button("Fetch and Analyze", use_container_width=True, type="primary", key="l_go"):
         live_market = detect_market(live_sym)
         live_currency = get_currency_symbol(live_market)
         live_r = live_r_pct / 100.0
@@ -574,9 +567,9 @@ with tab_live:
 
         # ── Indian market: synthetic chain ────────────────────────────
         if live_market == "IN":
-            st.info("ℹ️ Indian stock options are not available via yfinance. "
+            st.info("Indian stock options are not available via yfinance. "
                     "Displaying a **BS-priced synthetic option chain** computed from "
-                    "live spot price + historical volatility.", icon="🇮🇳")
+                    "live spot price + historical volatility.")
 
             calls_df, puts_df, expiry_str, is_synth = build_indian_option_chain(
                 live_sym, spot, hvol, live_r, int(live_expiry_days)
@@ -679,7 +672,7 @@ with tab_live:
                     .applymap(_money_color, subset=["Moneyness"])
                     .format(precision=2))
 
-        call_tab, put_tab = st.tabs([f"📈 Calls ({live_sym})", f"📉 Puts ({live_sym})"])
+        call_tab, put_tab = st.tabs([f"Calls ({live_sym})", f"Puts ({live_sym})"])
 
         for tab_obj, opt_t, df_side in [(call_tab, "call", calls_df), (put_tab, "put", puts_df)]:
             with tab_obj:
@@ -694,14 +687,14 @@ with tab_live:
                 sells = len(result_df[result_df["Signal"] == "SELL"])
                 holds = len(result_df[result_df["Signal"] == "HOLD"])
                 s1, s2, s3, s4 = st.columns(4)
-                with s1: st.metric("🟢 BUY (Undervalued)", buys)
-                with s2: st.metric("🔴 SELL (Overvalued)", sells)
-                with s3: st.metric("🟡 HOLD (Fair Value)", holds)
+                with s1: st.metric("BUY (Undervalued)", buys)
+                with s2: st.metric("SELL (Overvalued)", sells)
+                with s3: st.metric("HOLD (Fair Value)", holds)
                 with s4: st.metric("Total Analyzed", len(result_df))
 
                 # Download
                 csv_data = result_df.to_csv(index=False)
-                st.download_button(f"⬇️ Download {opt_t.capitalize()} Analysis CSV",
+                st.download_button(f"Download {opt_t.capitalize()} Analysis CSV",
                                    csv_data, f"{live_sym}_{opt_t}_bs_analysis.csv",
                                    mime="text/csv")
 
@@ -732,7 +725,7 @@ with tab_batch:
         batch_days = st.number_input("Days to Expiry (ATM)", value=30, min_value=7, step=1)
         batch_threshold = st.number_input("Signal Threshold (%)", value=5.0, step=0.5, min_value=1.0)
 
-    if st.button("🚀 Run Batch Analysis", use_container_width=True, type="primary", key="batch_go"):
+    if st.button("Run Batch Analysis", use_container_width=True, type="primary", key="batch_go"):
         symbols = [s.strip() for s in batch_symbols_raw.strip().splitlines() if s.strip()]
         if not symbols:
             st.warning("Enter at least one ticker.")
@@ -766,7 +759,7 @@ with tab_batch:
 
                     batch_rows.append({
                         "Ticker": sym,
-                        "Market": "🇮🇳 India" if market == "IN" else "🇺🇸 US",
+                        "Market": "India" if market == "IN" else "US",
                         "Currency": currency,
                         "Spot Price": f"{currency}{spot:,.2f}",
                         "Hist. Vol %": f"{sigma*100:.1f}%",
@@ -789,7 +782,7 @@ with tab_batch:
                 st.dataframe(batch_df, use_container_width=True, height=450)
 
                 csv_batch = batch_df.to_csv(index=False)
-                st.download_button("⬇️ Download Batch Results", csv_batch,
+                st.download_button("Download Batch Results", csv_batch,
                                    "batch_bs_analysis.csv", mime="text/csv",
                                    use_container_width=True)
 
@@ -815,7 +808,7 @@ with tab_csv:
         {"symbol": "TCS.NS", "market": "IN", "S": 3800, "K": 3750, "T_days": 35,
          "r": 0.068, "sigma": 0.19, "q": 0.0, "market_price": 0, "option_type": "put"},
     ])
-    st.download_button("⬇️ Download Sample CSV Template",
+    st.download_button("Download Sample CSV Template",
                        sample.to_csv(index=False),
                        "bs_sample_template.csv", mime="text/csv")
 
@@ -860,7 +853,7 @@ with tab_csv:
                     g = res["greeks"][otype]
                     entry = {
                         "Symbol": row.get("symbol", "—"),
-                        "Market": "🇮🇳" if mkt_code == "IN" else "🇺🇸",
+                        "Market": "IN" if mkt_code == "IN" else "US",
                         "Type": otype.upper(),
                         "Spot": f"{curr}{float(row['S']):,.2f}",
                         "Strike": f"{curr}{float(row['K']):,.2f}",
@@ -897,7 +890,7 @@ with tab_csv:
                 styled_out = styled_out.applymap(_style_csv_signal, subset=["Signal"])
 
             st.dataframe(styled_out, use_container_width=True, height=500)
-            st.download_button("⬇️ Download Results CSV",
+            st.download_button("Download Results CSV",
                                df_out.to_csv(index=False),
                                "bs_results.csv", mime="text/csv",
                                use_container_width=True)
@@ -911,7 +904,7 @@ with tab_csv:
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("### ⚙️  Quick Reference")
+    st.markdown("### Quick Reference")
     st.markdown("""
 **Indian Tickers**
 `RELIANCE.NS` · `TCS.NS` · `INFY.NS`
@@ -925,24 +918,24 @@ with st.sidebar:
 **Default Risk-Free Rates**
 | Market | Rate | Benchmark |
 |--------|------|-----------|
-| 🇮🇳 India | 6.8% | RBI 10yr G-Sec |
-| 🇺🇸 US | 5.3% | Fed 10yr Treasury |
+| India | 6.8% | RBI 10yr G-Sec |
+| US | 5.3% | Fed 10yr Treasury |
 
 ---
 
 **Signal Logic**
 | Signal | Condition |
 |--------|-----------|
-| 🟢 BUY | Market < BS Theo − threshold |
-| 🔴 SELL | Market > BS Theo + threshold |
-| 🟡 HOLD | Within threshold |
+| BUY | Market < BS Theo − threshold |
+| SELL | Market > BS Theo + threshold |
+| HOLD | Within threshold |
 
 ---
 
 **Confidence Score**
-- 0–39: 🔴 Low
-- 40–69: 🟡 Medium
-- 70–100: 🟢 High
+- 0–39: Low
+- 40–69: Medium
+- 70–100: High
 
 Based on: time-to-expiry, moneyness, mispricing magnitude.
 
@@ -951,4 +944,4 @@ Based on: time-to-expiry, moneyness, mispricing magnitude.
     st.caption("Model: Black–Scholes–Merton (1973)")
     st.caption("IV Solver: Brent's method (scipy)")
     st.caption("Data: yfinance (live/delayed)")
-    st.caption("⚠️ For educational use only.")
+    st.caption("For educational use only.")

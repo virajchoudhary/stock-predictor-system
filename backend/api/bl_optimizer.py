@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from pypfopt import BlackLittermanModel, risk_models, expected_returns
+from pypfopt import BlackLittermanModel, EfficientFrontier, risk_models
 from pypfopt.black_litterman import market_implied_prior_returns
-from .ai_services import TrendPredictor, get_price_history
+from .ai_services import PortfolioOptimizer, TrendPredictor, get_price_history
 from .models import OptimizedHyperparams
 
 
@@ -133,7 +133,7 @@ def build_views(tickers):
     return views, confidences, view_details
 
 
-def run_black_litterman(tickers):
+def run_black_litterman(tickers, risk_tolerance=0.5):
     """
     Full BL pipeline:
     1. Fetch price history and compute covariance matrix
@@ -149,6 +149,7 @@ def run_black_litterman(tickers):
         error: str or None
     """
     requested_tickers = [str(t).upper() for t in tickers]
+    risk_tolerance = float(np.clip(risk_tolerance, 0.0, 1.0))
     try:
         # --- Price data ---
         frames = {}
@@ -221,16 +222,63 @@ def run_black_litterman(tickers):
 
         bl_returns = bl.bl_returns()
 
-        # --- Mean-Variance optimization on BL returns ---
-        from pypfopt import EfficientFrontier
-        ef = EfficientFrontier(bl_returns, cov_matrix)
-        ef.max_sharpe(risk_free_rate=0.05)
-        weights = ef.clean_weights()
+        conservative_fallback = PortfolioOptimizer._inverse_volatility_weights(
+            cov_matrix,
+            valid_tickers,
+        )
+        aggressive_fallback = PortfolioOptimizer._positive_return_weights(
+            bl_returns,
+            valid_tickers,
+        )
+        fallback_notes = []
 
-        allocation = {
-            ticker: round(float(weights.get(ticker, 0.0)), 4)
-            for ticker in valid_tickers
-        }
+        try:
+            ef_conservative = EfficientFrontier(bl_returns, cov_matrix, weight_bounds=(0, 1))
+            ef_conservative.min_volatility()
+            conservative = PortfolioOptimizer._extract_weight_series(
+                pd.Series(ef_conservative.clean_weights()),
+                valid_tickers,
+            )
+        except Exception:
+            conservative = conservative_fallback.copy()
+            fallback_notes.append("conservative BL profile used inverse-vol fallback")
+
+        try:
+            ef_aggressive = EfficientFrontier(bl_returns, cov_matrix, weight_bounds=(0, 1))
+            ef_aggressive.max_sharpe(risk_free_rate=0.05)
+            aggressive = PortfolioOptimizer._extract_weight_series(
+                pd.Series(ef_aggressive.clean_weights()),
+                valid_tickers,
+            )
+        except Exception:
+            aggressive = aggressive_fallback.copy()
+            fallback_notes.append("aggressive BL profile used posterior-return fallback")
+
+        try:
+            ef_balanced = EfficientFrontier(bl_returns, cov_matrix, weight_bounds=(0, 1))
+            ef_balanced.max_quadratic_utility(risk_aversion=2.0)
+            balanced_solver = PortfolioOptimizer._extract_weight_series(
+                pd.Series(ef_balanced.clean_weights()),
+                valid_tickers,
+            )
+            balanced = PortfolioOptimizer._normalize_weight_series(
+                conservative * 0.45 + balanced_solver * 0.55,
+                valid_tickers,
+            )
+        except Exception:
+            balanced = PortfolioOptimizer._normalize_weight_series(
+                (conservative + aggressive) / 2.0,
+                valid_tickers,
+            )
+            fallback_notes.append("balanced BL profile used conservative/aggressive blend fallback")
+
+        blended, blend_meta = PortfolioOptimizer._blend_profiles(
+            conservative,
+            balanced,
+            aggressive,
+            risk_tolerance,
+        )
+        allocation = PortfolioOptimizer._stabilize_weight_series(blended, valid_tickers)
 
         bl_returns_pct = {
             ticker: round(float(bl_returns.get(ticker, 0.0)) * 100, 2)
@@ -238,8 +286,13 @@ def run_black_litterman(tickers):
         }
         missing_view_tickers = [ticker for ticker in valid_tickers if ticker not in views]
 
+        ordered_allocation = {
+            ticker: round(float(allocation.get(ticker, 0.0)), 4)
+            for ticker in valid_tickers
+        }
+
         return {
-            "allocation":   allocation,
+            "allocation":   ordered_allocation,
             "view_details": view_details,
             "bl_returns":   bl_returns_pct,
             "requested_tickers": requested_tickers,
@@ -248,7 +301,8 @@ def run_black_litterman(tickers):
             "view_tickers": view_symbols,
             "missing_view_tickers": missing_view_tickers,
             "source": "bl",
-            "fallback_reason": None,
+            "blend_meta": blend_meta,
+            "fallback_reason": "; ".join(fallback_notes) or None,
             "error":        None
         }
 
