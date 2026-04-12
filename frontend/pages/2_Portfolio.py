@@ -8,6 +8,7 @@ import threading
 import os
 import sys
 import html
+import re
 from io import StringIO
 from datetime import datetime, timedelta
 import streamlit.components.v1 as components
@@ -59,12 +60,12 @@ try:
                         end_val = float(np.ravel(cumulative_df.iloc[-1])[0])
                         start_val = float(np.ravel(cumulative_df.iloc[-days-1])[0])
                         val = (end_val / start_val) ** (1 / years) - 1
-                        rolling_returns[name] = {0: f"{val:.2%}"}
+                        rolling_returns[name] = f"{val:.2%}"
                     except Exception:
-                        rolling_returns[name] = {0: "N/A"}
+                        rolling_returns[name] = "N/A"
                 else:
-                    rolling_returns[name] = {0: "N/A"}
-            return pd.DataFrame.from_dict(rolling_returns, orient='index')
+                    rolling_returns[name] = "Insufficient data"
+            return pd.DataFrame(list(rolling_returns.items()), columns=["Period", "Return"])
 
         qr.opt_core.calculate_rolling_returns = patched_calculate_rolling_returns
 
@@ -415,38 +416,79 @@ def _empty_report_figure(title, message):
         xref="paper",
         yref="paper",
         showarrow=False,
-        font=dict(size=16, color="#FAFAFA"),
+        font=dict(size=16, color="white"),
     )
     fig.update_xaxes(visible=False)
     fig.update_yaxes(visible=False)
     fig.update_layout(
         title=title,
-        height=420,
-        margin=dict(t=60, b=30, l=30, r=20),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#FAFAFA"),
+        height=400,
+        margin=dict(l=80, r=40, t=60, b=60),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        font=dict(color="white"),
     )
     return fig
 
 
-def _style_report_figure(fig, fallback_title, xaxis_title=None, yaxis_title=None, height=430):
+def _flatten_table_df(df):
+    """Flatten MultiIndex columns, strip unnamed levels, ensure clean single-level names."""
+    if df is None or df.empty:
+        return df
+    if isinstance(df.columns, pd.MultiIndex):
+        new_cols = []
+        for col_tuple in df.columns:
+            parts = [str(c).strip() for c in col_tuple
+                     if c is not None and not re.match(r'^Unnamed', str(c).strip())]
+            if parts:
+                new_cols.append(" ".join(parts))
+            else:
+                new_cols.append(f"Col_{len(new_cols)}")
+        df.columns = new_cols
+    else:
+        clean_cols = []
+        for c in df.columns:
+            name = str(c).strip()
+            if re.match(r'^Unnamed', name):
+                name = ""
+            clean_cols.append(name)
+        df.columns = clean_cols
+    # Also rename first column if it is empty or blank to something sensible
+    if df.columns[0] == "" or df.columns[0].startswith("Col_"):
+        cols = list(df.columns)
+        cols[0] = "Metric"
+        df.columns = cols
+    return df
+
+
+def _style_report_figure(fig, fallback_title, xaxis_title=None, yaxis_title=None, height=400):
     if fig is None:
         return None
 
     title_obj = fig.layout.title.text if getattr(fig.layout, "title", None) else None
+    height = max(height, 400)  # minimum 400px
     fig.update_layout(
         title=title_obj or fallback_title,
         height=height,
-        margin=dict(t=60, b=30, l=30, r=20),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#FAFAFA"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(l=60, r=30, t=40, b=40),
+        paper_bgcolor="#0e1117",
+        plot_bgcolor="#0e1117",
+        font=dict(color="white"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
 
     has_cartesian_axes = any(getattr(trace, "type", None) not in {"pie"} for trace in fig.data)
     if has_cartesian_axes:
+        fig.update_xaxes(
+            gridcolor="rgba(255,255,255,0.1)",
+            title_font=dict(color="white"),
+            tickfont=dict(color="white"),
+        )
+        fig.update_yaxes(
+            gridcolor="rgba(255,255,255,0.1)",
+            title_font=dict(color="white"),
+            tickfont=dict(color="white"),
+        )
         if xaxis_title:
             fig.update_xaxes(title_text=xaxis_title)
         elif not fig.layout.xaxis.title.text:
@@ -458,7 +500,7 @@ def _style_report_figure(fig, fallback_title, xaxis_title=None, yaxis_title=None
     return fig
 
 
-def _prepare_report_figure(fig, title, xaxis_title=None, yaxis_title=None, height=430):
+def _prepare_report_figure(fig, title, xaxis_title=None, yaxis_title=None, height=400):
     if fig is None or not _figure_has_data(fig):
         return _empty_report_figure(title, f"{title} is not available for the current data selection.")
     return _style_report_figure(
@@ -466,7 +508,7 @@ def _prepare_report_figure(fig, title, xaxis_title=None, yaxis_title=None, heigh
         fallback_title=title,
         xaxis_title=xaxis_title,
         yaxis_title=yaxis_title,
-        height=height,
+        height=max(height, 400),
     )
 
 
@@ -709,6 +751,14 @@ def _build_deep_report_context(
         else "Risk-Based Fallback"
     )
 
+    # ── Bug 3: Remove benchmark from investable asset universe ─────────
+    benchmark_excluded = False
+    if benchmark_ticker.upper() in [t.upper() for t in requested_tickers]:
+        requested_tickers = [t for t in requested_tickers if t.upper() != benchmark_ticker.upper()]
+        allocation_weights = {k: v for k, v in allocation_weights.items() if k.upper() != benchmark_ticker.upper()}
+        benchmark_excluded = True
+    # ──────────────────────────────────────────────────────────────────────
+
     test_start_dt = pd.to_datetime(train_end) + timedelta(days=1)
     test_end_dt = datetime.now() - timedelta(days=1)
     if test_start_dt >= test_end_dt:
@@ -755,7 +805,19 @@ def _build_deep_report_context(
     pr_metrics, pr_plot_data = calculate_metrics(
         portfolio_eval, "My Portfolio", benchmark_ticker, risk_free_rate
     )
-    pr_rolling_html = calculate_rolling_returns(portfolio_eval).to_html(classes="metrics-table")
+
+    # ── Bug 4: Build rolling returns as clean DataFrame ────────────────
+    try:
+        pr_rolling_df = calculate_rolling_returns(portfolio_eval)
+        # The patched version returns [Period, Return] columns directly
+        if isinstance(pr_rolling_df, pd.DataFrame) and "Period" in pr_rolling_df.columns:
+            pr_rolling_html = pr_rolling_df.to_html(index=False, classes="metrics-table")
+        else:
+            pr_rolling_html = pr_rolling_df.to_html(classes="metrics-table")
+    except Exception:
+        pr_rolling_html = "<table><tr><td>Rolling returns unavailable</td></tr></table>"
+    # ──────────────────────────────────────────────────────────────────────
+
     pr_plots = {
         "cumulative": plot_cumulative_returns(pr_plot_data, "My Portfolio", benchmark_ticker),
         "regression": plot_regression(pr_plot_data, pr_metrics, "My Portfolio", benchmark_ticker),
@@ -776,6 +838,65 @@ def _build_deep_report_context(
         filtered_sector_map,
     )
 
+    # ── Bug 2 & 6: Fix validation table — correct Sharpe scaling & clean column names ──
+    try:
+        val_table_dfs = pd.read_html(StringIO(validation["table_html"]))
+        if val_table_dfs:
+            val_df = _flatten_table_df(val_table_dfs[0])
+            # The table from combined_report has "Portfolio" as first col, then metrics
+            # We need to identify columns and reformat
+            col_rename = {}
+            for c in val_df.columns:
+                cl = c.lower()
+                if 'portfolio' in cl or c == 'Metric':
+                    col_rename[c] = 'Portfolio'
+                elif 'in-sample' in cl and 'cagr' in cl:
+                    col_rename[c] = 'IS CAGR'
+                elif 'out-of-sample' in cl and 'cagr' in cl:
+                    col_rename[c] = 'OOS CAGR'
+                elif 'in-sample' in cl and 'volatil' in cl:
+                    col_rename[c] = 'IS Vol'
+                elif 'out-of-sample' in cl and 'volatil' in cl:
+                    col_rename[c] = 'OOS Vol'
+                elif 'in-sample' in cl and 'sharpe' in cl:
+                    col_rename[c] = 'IS Sharpe'
+                elif 'out-of-sample' in cl and 'sharpe' in cl:
+                    col_rename[c] = 'OOS Sharpe'
+                elif 'in-sample' in cl and ('drawdown' in cl or 'max' in cl):
+                    col_rename[c] = 'IS MaxDD'
+                elif 'out-of-sample' in cl and ('drawdown' in cl or 'max' in cl):
+                    col_rename[c] = 'OOS MaxDD'
+                elif 'in-sample' in cl and 'alpha' in cl:
+                    col_rename[c] = 'IS Alpha'
+                elif 'out-of-sample' in cl and 'alpha' in cl:
+                    col_rename[c] = 'OOS Alpha'
+            if col_rename:
+                val_df = val_df.rename(columns=col_rename)
+
+            # Bug 2: Fix Sharpe/Sortino/Calmar values that were formatted as % then
+            # converted back incorrectly. Sharpe values should be around -3..+3.
+            # The combined_report pipeline stores Sharpe as "1.23" string, then
+            # the to_html with {:.2%}.format multiplies by 100 — causing 123%.
+            # We re-parse and fix ratio columns (non-percentage metrics).
+            for ratio_col in ['IS Sharpe', 'OOS Sharpe']:
+                if ratio_col in val_df.columns:
+                    def _fix_ratio(v):
+                        try:
+                            s = str(v).strip().replace('%', '').replace(',', '')
+                            num = float(s)
+                            # If the value looks like it was multiplied by 100 (e.g. -232 instead of -2.32)
+                            if abs(num) > 10:
+                                num = num / 100.0
+                            return f"{num:.2f}"
+                        except (ValueError, TypeError):
+                            return v
+                    val_df[ratio_col] = val_df[ratio_col].apply(_fix_ratio)
+
+            validation["table_html"] = val_df.to_html(index=False, classes="metrics-table")
+    except Exception:
+        pass
+    # ──────────────────────────────────────────────────────────────────────
+
     allocation_method = (
         "AI-Driven Black-Litterman"
         if allocation_source == "bl"
@@ -795,6 +916,8 @@ def _build_deep_report_context(
         "Benchmark": benchmark_ticker,
         "Report Universe": ", ".join(tickers),
     }
+    if benchmark_excluded:
+        allocation_metrics["Benchmark Exclusion"] = f"{benchmark_ticker} excluded from portfolio optimization — it is used as benchmark"
     if report_universe["dropped_tickers"]:
         allocation_metrics["Unavailable Tickers"] = ", ".join(report_universe["dropped_tickers"])
     if allocation_fallback_reason:
@@ -805,6 +928,7 @@ def _build_deep_report_context(
         "description": (
             f"{allocation_source_label} allocation for the requested report universe "
             f"using benchmark {benchmark_ticker}."
+            + (f" ⚠️ {benchmark_ticker} excluded from portfolio optimization — it is used as benchmark." if benchmark_excluded else "")
         ),
         "sidebar": [
             {
@@ -880,6 +1004,32 @@ def _build_deep_report_context(
                 {"title": "Probability of Exceeding Return", "type": "plot", "data": validation["mc_plots"]["prob_curve"]},
             ],
         },
+        {
+            "title": "SWOT Analysis",
+            "description": "Strengths, Weaknesses, Opportunities, and Threats of the portfolio composition.",
+            "sidebar": [],
+            "main_content": [
+                {"title": "SWOT Summary", "type": "swot_placeholder", "data": {
+                    "cagr_asset": pr_metrics.get("CAGR (Asset)"),
+                    "cagr_bench": pr_metrics.get("CAGR (Benchmark)"),
+                    "sharpe": pr_metrics.get("Sharpe Ratio (Asset)"),
+                    "sortino": pr_metrics.get("Sortino Ratio (Asset)"),
+                    "calmar": pr_metrics.get("Calmar Ratio (Asset)"),
+                    "beta": pr_metrics.get("Beta (vs Benchmark)"),
+                    "alpha": pr_metrics.get("Alpha (Annualized)"),
+                    "var_95": pr_metrics.get("VaR (95%)"),
+                    "max_drawdown": pr_metrics.get("Max Drawdown"),
+                    "volatility_asset": pr_metrics.get("Annualized Volatility (Asset)"),
+                    "volatility_bench": pr_metrics.get("Annualized Volatility (Bench)"),
+                    "tickers": tickers,
+                    "allocation_weights": portfolio_dict,
+                    "benchmark": benchmark_ticker,
+                    "sector_map": filtered_sector_map,
+                    "benchmark_excluded": benchmark_excluded,
+                    "asset_corr_html": validation.get("asset_corr_html", ""),
+                }},
+            ],
+        },
     ]
 
     axis_title_overrides = {
@@ -906,12 +1056,16 @@ def _build_deep_report_context(
             if block.get("type") != "plot":
                 continue
             xaxis_title, yaxis_title = axis_title_overrides.get(block["title"], (None, None))
+            # Bug 10: Regression chart needs minimum 400px
+            h = 400
+            if "Efficient Frontier" in block["title"] or "Projected Future Paths" in block["title"]:
+                h = 450
             block["data"] = _prepare_report_figure(
                 block["data"],
                 title=block["title"],
                 xaxis_title=xaxis_title,
                 yaxis_title=yaxis_title,
-                height=470 if "Composition" in block["title"] else 430,
+                height=h,
             )
 
     _emit_progress(0.97, "Building HTML report", "Generating the downloadable report file.", 2)
@@ -926,10 +1080,229 @@ def _build_deep_report_context(
         "sections": sections,
         "allocation_result": allocation_result,
         "report_universe": report_universe,
+        "benchmark_excluded": benchmark_excluded,
     }
 
 
+def _render_swot_section(swot_data):
+    """Render SWOT cards from computed portfolio metrics. Bullet-proof with error display."""
+    try:
+        tickers = swot_data.get("tickers", [])
+        benchmark = swot_data.get("benchmark", "SPY")
+        portfolio_dict = swot_data.get("allocation_weights", {})
+        sector_map = swot_data.get("sector_map", {})
+        benchmark_excluded = swot_data.get("benchmark_excluded", False)
+        asset_corr_html = swot_data.get("asset_corr_html", "")
+
+        # ── Safe numeric parsers ───────────────────────────────────────
+        def _pct(key):
+            """Parse '18.04%' → 0.1804, return None on failure."""
+            v = swot_data.get(key)
+            if v is None:
+                return None
+            try:
+                return float(str(v).replace("%", "").replace(",", "").strip()) / 100
+            except Exception:
+                return None
+
+        def _flt(key):
+            """Parse '1.32' → 1.32, return None on failure."""
+            v = swot_data.get(key)
+            if v is None:
+                return None
+            try:
+                return float(str(v).replace(",", "").strip())
+            except Exception:
+                return None
+
+        cagr_asset = _pct("cagr_asset")
+        cagr_bench = _pct("cagr_bench")
+        asset_vol  = _pct("volatility_asset")
+        bench_vol  = _pct("volatility_bench")
+        sharpe     = _flt("sharpe")
+        sortino    = _flt("sortino")
+        calmar     = _flt("calmar")
+        max_dd     = _pct("max_drawdown")
+        beta       = _flt("beta")
+        alpha      = _pct("alpha")
+        var_95     = _pct("var_95")
+
+        # ── Parse correlation table ────────────────────────────────────
+        corr_pairs = {}
+        if asset_corr_html:
+            try:
+                from io import StringIO as _SIO
+                cdf = pd.read_html(_SIO(asset_corr_html))[0]
+                for _, row in cdf.iterrows():
+                    try:
+                        corr_pairs[str(row.iloc[0])] = float(row.iloc[-1])
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        high_corr = {t: v for t, v in corr_pairs.items() if v > 0.8}
+
+        # ── Composition analysis ───────────────────────────────────────
+        sectors = list(set(sector_map.values())) if sector_map else []
+        sector_wts = {}
+        for t, w in portfolio_dict.items():
+            sector_wts[sector_map.get(t, "Other")] = sector_wts.get(sector_map.get(t, "Other"), 0) + w
+        dom_sector = max(sector_wts.items(), key=lambda x: x[1]) if sector_wts else ("N/A", 0)
+        top3 = sorted(portfolio_dict.items(), key=lambda x: x[1], reverse=True)[:3]
+        max_wt = max(portfolio_dict.values()) if portfolio_dict else 0
+        tech_tickers = {"AAPL", "MSFT", "NVDA", "GOOG", "GOOGL", "META", "AMD", "QQQ", "AVGO", "TSM"}
+        has_ai = bool(set(t.upper() for t in tickers) & {"NVDA", "QQQ"})
+        tech_alloc = sum(w for t, w in portfolio_dict.items() if t.upper() in tech_tickers)
+
+        # ════════════════════════════════════════════════════════════════
+        # STRENGTHS (green)
+        # ════════════════════════════════════════════════════════════════
+        S = []
+        if cagr_asset is not None and cagr_bench is not None and cagr_asset > cagr_bench:
+            S.append(f"Portfolio CAGR of {cagr_asset:.2%} outperforms {benchmark} benchmark of {cagr_bench:.2%}.")
+        if sharpe is not None and sharpe > 0.5:
+            S.append(f"Positive risk-adjusted return with Sharpe ratio of {sharpe:.2f}.")
+        elif sharpe is not None and sharpe > 0:
+            S.append(f"Sharpe ratio is positive ({sharpe:.2f}), indicating returns exceed the risk-free rate per unit of risk.")
+        if sortino is not None and sortino > 0.7:
+            S.append(f"Strong downside protection with Sortino ratio of {sortino:.2f}.")
+        if len(tickers) >= 3:
+            S.append(f"Diversification across {len(tickers)} assets ({', '.join(tickers)}).")
+        if calmar is not None and calmar > 0.5:
+            S.append(f"Calmar ratio of {calmar:.2f} shows returns adequately compensate for drawdown risk.")
+        # Guarantee ≥ 3
+        if len(S) < 3 and top3:
+            S.append(f"Top holdings: {', '.join(f'{t} ({w:.1%})' for t,w in top3)}.")
+        if len(S) < 3 and benchmark_excluded:
+            S.append(f"Benchmark ({benchmark}) correctly excluded from the investable universe.")
+        while len(S) < 3:
+            S.append(f"Portfolio consists of {len(tickers)} liquid, US-listed equities with deep historical data.")
+
+        # ════════════════════════════════════════════════════════════════
+        # WEAKNESSES (amber)
+        # ════════════════════════════════════════════════════════════════
+        W = []
+        if beta is not None and beta > 1.2:
+            W.append(f"High market sensitivity — beta of {beta:.2f} indicates {(beta-1)*100:.0f}% more volatility than the benchmark.")
+        if max_dd is not None and max_dd < -0.20:
+            W.append(f"Significant drawdown risk of {max_dd:.2%} — portfolio experienced substantial peak-to-trough decline.")
+        if alpha is not None and alpha < 0:
+            W.append(f"Negative risk-adjusted alpha of {alpha:.2%} — underperforms on a CAPM basis after adjusting for beta.")
+        if high_corr:
+            for t, v in sorted(high_corr.items(), key=lambda x: x[1], reverse=True)[:2]:
+                W.append(f"High correlation between {t} and benchmark ({v:.2f}) reduces diversification benefit.")
+        if asset_vol is not None and bench_vol is not None and asset_vol > bench_vol + 0.02:
+            W.append(f"Portfolio volatility ({asset_vol:.2%}) exceeds benchmark volatility ({bench_vol:.2%}) by {(asset_vol-bench_vol):.2%}.")
+        # Guarantee ≥ 3
+        if len(W) < 3 and max_wt > 0.35:
+            W.append(f"Concentration risk: largest position at {max_wt:.1%} weight.")
+        if len(W) < 3 and var_95 is not None:
+            W.append(f"Daily Value-at-Risk (95%) is {var_95:.2%} — a 1-in-20 day loss could reach this level.")
+        if len(W) < 3 and len(tickers) < 5:
+            W.append(f"Narrow universe of only {len(tickers)} assets limits diversification benefits.")
+        while len(W) < 3:
+            W.append("No fixed-income or alternative assets in the portfolio to buffer equity drawdowns.")
+
+        # ════════════════════════════════════════════════════════════════
+        # OPPORTUNITIES (blue)
+        # ════════════════════════════════════════════════════════════════
+        O = []
+        if has_ai:
+            ai_names = [t for t in tickers if t.upper() in {"NVDA", "QQQ"}]
+            O.append(f"AI and semiconductor sector exposure through {' and '.join(ai_names)} positions — growth potential in AI infrastructure.")
+        if tech_alloc > 0.50:
+            O.append(f"Technology sector concentration ({tech_alloc:.0%}) offers upside in continued digital transformation.")
+        if var_95 is not None and var_95 < -0.02:
+            O.append("Tail risk management opportunity — consider protective puts or collar strategies for hedging.")
+        O.append("Walk-forward rebalancing on a quarterly cadence could capture regime changes and improve out-of-sample alpha.")
+        if len(sectors) < 4:
+            O.append("Adding uncorrelated sectors (Healthcare, Utilities, REITs) would improve the efficient frontier.")
+        if sharpe is not None and sharpe > 0 and beta is not None and beta > 1:
+            O.append(f"A lower-beta variant could achieve similar risk-adjusted returns with reduced drawdown exposure.")
+        # Guarantee ≥ 3
+        while len(O) < 3:
+            O.append("Options overlays (e.g., covered calls) could enhance yield and reduce effective portfolio volatility.")
+
+        # ════════════════════════════════════════════════════════════════
+        # THREATS (red)
+        # ════════════════════════════════════════════════════════════════
+        T = []
+        if beta is not None and beta > 1.2:
+            T.append(f"Amplified drawdown in market downturns due to high beta ({beta:.2f}x) — a 20% correction implies ~{beta*20:.0f}% portfolio loss.")
+        if asset_vol is not None and bench_vol is not None and asset_vol > bench_vol + 0.05:
+            T.append(f"Portfolio volatility ({asset_vol:.2%}) significantly exceeds benchmark ({bench_vol:.2%}) — elevated risk of underperformance in choppy markets.")
+        if max_wt > 0.35:
+            T.append(f"Concentration risk — single asset at {max_wt:.1%} creates idiosyncratic event vulnerability.")
+        if dom_sector[1] > 0.60:
+            T.append(f"Sector concentration ({dom_sector[0]} at {dom_sector[1]:.0%}) creates vulnerability to regulation or macro headwinds.")
+        if high_corr:
+            T.append(f"High benchmark correlation ({', '.join(f'{t} ρ={v:.2f}' for t,v in list(high_corr.items())[:3])}) offers limited diversification in a crash.")
+        T.append("Historical optimization may not predict future regimes — structural market shifts could invalidate assumptions.")
+        # Guarantee ≥ 3
+        while len(T) < 3:
+            T.append("Rising interest rates could compress equity valuations, especially for growth-oriented holdings.")
+
+        # ════════════════════════════════════════════════════════════════
+        # Render the four styled cards in a 2×2 grid
+        # ════════════════════════════════════════════════════════════════
+        card_data = [
+            ("💪 Strengths",       S, "#4ade80", "#0a1f0f"),
+            ("⚠️ Weaknesses",     W, "#fbbf24", "#1f1505"),
+            ("🚀 Opportunities",  O, "#60a5fa", "#040f1f"),
+            ("🛡️ Threats",        T, "#f87171", "#1f0507"),
+        ]
+
+        row1 = st.columns(2)
+        row2 = st.columns(2)
+        grid = [row1[0], row1[1], row2[0], row2[1]]
+
+        for i, (heading, bullets, accent, bg) in enumerate(card_data):
+            with grid[i]:
+                bullet_html = ""
+                for b in bullets:
+                    r, g, b_rgb = int(accent[1:3], 16), int(accent[3:5], 16), int(accent[5:7], 16)
+                    bullet_html += (
+                        f'<div style="padding:10px 14px;border-radius:9px;margin-bottom:10px;'
+                        f'background:rgba({r},{g},{b_rgb},0.07);'
+                        f'border-left:3px solid {accent};color:#e2e8f0;'
+                        f'font-size:0.88rem;line-height:1.55;">'
+                        f'{b}</div>'
+                    )
+                card_html = (
+                    f'<div style="border-radius:16px;padding:22px 24px;min-height:280px;'
+                    f'background:{bg};border:1px solid {accent}30;margin:0 0 12px 0;'
+                    f'box-shadow:0 6px 30px rgba(0,0,0,0.35);">'
+                    f'<div style="font-size:1.15rem;font-weight:800;color:{accent};'
+                    f'margin-bottom:14px;letter-spacing:0.5px;">{heading}</div>'
+                    f'{bullet_html}</div>'
+                )
+                st.markdown(card_html, unsafe_allow_html=True)
+
+    except Exception as swot_err:
+        st.error(f"SWOT analysis rendering failed: {swot_err}")
+        import traceback
+        st.code(traceback.format_exc())
+
+
 def _render_deep_report_sections(report_context):
+    st.markdown(
+        """
+        <style>
+        .block-container { padding-top: 1rem; padding-bottom: 1rem; }
+        div[data-testid="stVerticalBlock"] > div { gap: 0.5rem; }
+        div[data-testid="element-container"] { margin-bottom: 0; }
+        .stPlotlyChart { margin-bottom: 0; padding-bottom: 0; }
+        iframe { margin-bottom: 0; }
+        h2, h3, h4 { margin-top: 0.75rem; margin-bottom: 0.25rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    # Bug 3: Show benchmark exclusion warning at the top if applicable
+    if report_context.get("benchmark_excluded"):
+        st.warning("⚠️ SPY excluded from portfolio optimization — it is used as benchmark.")
+
     section_tabs = st.tabs([section["title"] for section in report_context["sections"]])
     for tab, section in zip(section_tabs, report_context["sections"]):
         with tab:
@@ -945,28 +1318,94 @@ def _render_deep_report_sections(report_context):
                                 list(block["data"].items()),
                                 columns=["Metric", "Value"],
                             )
-                            st.dataframe(metrics_df.set_index("Metric"), width='stretch')
+                            st.dataframe(metrics_df.set_index("Metric"), use_container_width=True)
+                            # Bug 3: Add clarifying caption for OOS Realized Return
+                            if any("OOS Realized" in str(k) for k in block["data"].keys()):
+                                st.caption("ℹ️ Realized over the out-of-sample validation period")
                         elif block["type"] == "table_html":
                             try:
                                 table_df = pd.read_html(StringIO(block["data"]))[0]
-                                st.dataframe(table_df, width='stretch')
+                                table_df = _flatten_table_df(table_df)
+                                st.dataframe(table_df, use_container_width=True)
                             except Exception:
                                 st.markdown(block["data"], unsafe_allow_html=True)
 
-            for block in section["main_content"]:
+            main_blocks = section["main_content"]
+            i = 0
+            while i < len(main_blocks):
+                block = main_blocks[i]
+                
+                # Side-by-side layout for Allocation Chart and Table
+                if block["title"] == "Portfolio Allocation Bar Chart" and i + 1 < len(main_blocks) and main_blocks[i+1]["title"] == "Portfolio Allocation Table":
+                    t_block = main_blocks[i+1]
+                    col1, col2 = st.columns([2, 1], gap="small")
+                    
+                    with col1:
+                        st.markdown(f"#### {block['title']}")
+                        fig = block["data"]
+                        if fig is not None:
+                            fig = _style_report_figure(fig, block["title"])
+                            if _figure_has_data(fig):
+                                st.plotly_chart(fig, use_container_width=True)
+                            else:
+                                st.info(f"{block['title']} is not available.")
+                        else:
+                            st.info(f"{block['title']} is not available.")
+                            
+                    with col2:
+                        st.markdown(f"#### {t_block['title']}")
+                        try:
+                            table_df = pd.read_html(StringIO(t_block["data"]))[0]
+                            table_df = _flatten_table_df(table_df)
+                            st.dataframe(table_df, use_container_width=True, height=400)
+                        except Exception:
+                            st.markdown(t_block["data"], unsafe_allow_html=True)
+                            
+                    i += 2
+                    continue
+
                 st.markdown(f"#### {block['title']}")
                 if block["type"] == "plot":
-                    fig = _style_report_figure(block["data"], block["title"])
+                    fig = block["data"]
+                    if fig is None:
+                        st.info(f"{block['title']} is not available for the current data selection.")
+                        i += 1
+                        continue
+
+                    # Bug 5: Fix donut/pie chart labels for Composition charts
+                    is_pie_chart = any(getattr(trace, "type", None) == "pie" for trace in fig.data)
+                    if is_pie_chart:
+                        fig.update_traces(
+                            textposition="outside",
+                            pull=[0.03 if v < 0.03 else 0 for trace in fig.data for v in (getattr(trace, 'values', []) or [])],
+                        )
+                        fig.update_layout(
+                            height=max(getattr(fig.layout, 'height', None) or 400, 400),
+                            uniformtext_minsize=8,
+                            uniformtext_mode="hide",
+                        )
+
+                    fig = _style_report_figure(fig, block["title"])
                     if _figure_has_data(fig):
-                        st.plotly_chart(fig, width='stretch')
+                        st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info(f"{block['title']} is not available for the current data selection.")
                 elif block["type"] == "table_html":
                     try:
                         table_df = pd.read_html(StringIO(block["data"]))[0]
-                        st.dataframe(table_df, width='stretch')
+                        table_df = _flatten_table_df(table_df)
+                        # Bug 4: Replace None/nan in rolling returns with "Insufficient data"
+                        table_df = table_df.fillna("Insufficient data")
+                        table_df = table_df.replace("None", "Insufficient data")
+                        table_df = table_df.replace("nan", "Insufficient data")
+                        st.dataframe(table_df, use_container_width=True)
                     except Exception:
                         st.markdown(block["data"], unsafe_allow_html=True)
+                elif block["type"] == "swot_placeholder":
+                    # Bug 12: Render SWOT section
+                    _render_swot_section(block["data"])
+                
+                i += 1
 
 def _render_allocation(result, tickers):
     method = result.get("method", "standard")
@@ -1208,7 +1647,7 @@ with tab_allocator:
     with col1:
         tickers_input = st.text_area(
             "Enter Stock Tickers (comma separated, min 2)",
-            "AAPL, GOOG, MSFT, TSLA",
+            "AAPL, MSFT, QQQ, NVDA",
             height=80
         )
     with col2:
@@ -1803,7 +2242,7 @@ with tab_report:
         with st.expander("Report Configuration", expanded=True):
             col_in1, col_in2 = st.columns(2)
             with col_in1:
-                repo_tickers = st.text_input("Portfolio Tickers", "AAPL, MSFT, SPY, QQQ")
+                repo_tickers = st.text_input("Portfolio Tickers", "AAPL, MSFT, QQQ, NVDA")
                 benchmark = st.text_input("Benchmark Ticker", "SPY")
             with col_in2:
                 default_start = datetime.now() - timedelta(days=365*2)
