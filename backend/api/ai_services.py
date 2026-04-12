@@ -2,8 +2,16 @@ import os
 import json
 import numpy as np
 import pandas as pd
+from pathlib import Path
 from groq import Groq
 import yfinance as yf
+
+try:
+    _YF_CACHE_DIR = Path(__file__).resolve().parents[2] / ".cache" / "yfinance"
+    _YF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    yf.set_tz_cache_location(str(_YF_CACHE_DIR))
+except Exception:
+    pass
 
 # --- PyTorch (replaces tensorflow) ---
 import torch
@@ -33,14 +41,17 @@ polygon_client  = RESTClient(api_key=polygon_api_key) if polygon_api_key else No
 # LSTM Model Definition (PyTorch)
 # ---------------------------------------------------------------------------
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=50, num_layers=1):
+    def __init__(self, input_size=1, hidden_size=50, num_layers=1, dropout=0.0):
         super(LSTMModel, self).__init__()
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc   = nn.Linear(hidden_size, 1)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
+                            batch_first=True, 
+                            dropout=dropout if num_layers > 1 else 0.0)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size, 1)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(out[:, -1, :])
+        return self.fc(self.dropout(out[:, -1, :]))
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +74,7 @@ class GroqService:
                     {
                         "role": "system",
                         "content": (
-                            "You are a helpful financial assistant for the QuantVision app. "
+                            "You are a helpful financial assistant for the Stock Price Predictor app. "
                             "Use the provided context to answer questions."
                         ),
                     },
@@ -148,9 +159,18 @@ def get_price_history(symbol, period="6mo"):
         except Exception:
             pass  # Fall through to yfinance
 
-    # yfinance fallback
-    ticker = yf.Ticker(symbol)
-    return ticker.history(period=period)
+    # yfinance fallback. Use download() rather than Ticker.history() because
+    # the latter can fail on local cache initialization in some environments.
+    try:
+        hist = yf.download(symbol, period=period, progress=False, threads=False, auto_adjust=False)
+        if isinstance(hist, pd.DataFrame) and isinstance(hist.columns, pd.MultiIndex):
+            try:
+                hist = hist.droplevel(-1, axis=1)
+            except Exception:
+                hist.columns = hist.columns.get_level_values(0)
+        return hist if hist is not None and not hist.empty else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
 
 
 def get_ticker_info(symbol):
@@ -233,7 +253,143 @@ class TrendPredictor:
         return parsed
 
     @staticmethod
-    def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30):
+    def _get_close_series(price_frame):
+        if price_frame is None or getattr(price_frame, "empty", True):
+            return pd.Series(dtype=float)
+
+        close = price_frame["Close"] if "Close" in price_frame else price_frame
+        if isinstance(close, pd.DataFrame):
+            if close.shape[1] == 1:
+                close = close.iloc[:, 0]
+            else:
+                close = close.squeeze()
+
+        close = pd.to_numeric(close, errors="coerce").dropna()
+        close.name = "Close"
+        return close
+
+    @staticmethod
+    def _select_prediction_benchmark(symbol):
+        return "^NSEI" if symbol.endswith((".NS", ".BO")) else "SPY"
+
+    @staticmethod
+    def _historical_mean_projection(symbol, lookback_days=252):
+        """
+        Simple and explicit fallback when no reliable LSTM is available:
+        use the mean daily excess return over the last 252 trading days,
+        anchored to a broad market benchmark.
+        """
+        hist = get_price_history(symbol, period="2y")
+        close = TrendPredictor._get_close_series(hist)
+        if close.empty or len(close) < 20:
+            return None
+
+        current_price = float(close.iloc[-1])
+        asset_returns = close.pct_change().dropna()
+        if asset_returns.empty:
+            return None
+
+        benchmark_symbol = TrendPredictor._select_prediction_benchmark(symbol)
+        benchmark_close = TrendPredictor._get_close_series(
+            get_price_history(benchmark_symbol, period="2y")
+        )
+        benchmark_returns = benchmark_close.pct_change().dropna() if not benchmark_close.empty else pd.Series(dtype=float)
+
+        aligned_asset = asset_returns
+        aligned_benchmark = benchmark_returns
+        benchmark_used = False
+
+        if not benchmark_returns.empty:
+            aligned_asset, aligned_benchmark = asset_returns.align(
+                benchmark_returns,
+                join="inner",
+            )
+            benchmark_used = len(aligned_asset) >= 20
+
+        sample_size = min(len(aligned_asset), lookback_days)
+        if sample_size < 20:
+            sample_size = min(len(asset_returns), lookback_days)
+            asset_window = asset_returns.tail(sample_size)
+            mean_daily_return = float(asset_window.mean())
+            mean_daily_excess = None
+            benchmark_daily_return = None
+            benchmark_used = False
+        else:
+            asset_window = aligned_asset.tail(sample_size)
+            benchmark_window = aligned_benchmark.tail(sample_size)
+            mean_daily_excess = float((asset_window - benchmark_window).mean())
+            benchmark_daily_return = float(benchmark_window.mean())
+            mean_daily_return = mean_daily_excess + benchmark_daily_return
+
+        mean_daily_return = float(np.clip(mean_daily_return, -0.25, 0.25))
+        projected_price = current_price * (1.0 + mean_daily_return)
+        
+        label = (
+            f"Historical mean daily excess return vs {benchmark_symbol} ({sample_size}d)"
+            if benchmark_used
+            else f"Historical mean daily return ({sample_size}d)"
+        )
+
+        return {
+            "predicted_price": float(projected_price),
+            "expected_return": float(mean_daily_return),
+            "prediction_method": "historical_mean_fallback",
+            "prediction_label": label,
+            "benchmark_symbol": benchmark_symbol if benchmark_used else None,
+            "mean_daily_excess": mean_daily_excess,
+            "benchmark_daily_return": benchmark_daily_return,
+            "lookback_days": int(sample_size),
+        }
+
+    @staticmethod
+    def forecast_price(
+        symbol,
+        hidden_size=64,
+        num_layers=2,
+        learning_rate=0.001,
+        epochs=30,
+        dropout=0.0,
+        seq_len=20,
+        allow_lstm=True,
+    ):
+        if allow_lstm:
+            lstm_price = TrendPredictor._lstm_predict(
+                symbol,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                learning_rate=learning_rate,
+                epochs=epochs,
+                dropout=dropout,
+                seq_len=seq_len,
+            )
+
+            latest_close = TrendPredictor._get_close_series(
+                get_price_history(symbol, period="5d")
+            )
+            if (
+                lstm_price is not None
+                and np.isfinite(lstm_price)
+                and lstm_price > 0
+                and not latest_close.empty
+            ):
+                current_price = float(latest_close.iloc[-1])
+                expected_return = float((lstm_price - current_price) / current_price)
+                
+                return {
+                    "predicted_price": float(lstm_price),
+                    "expected_return": expected_return,
+                    "prediction_method": "lstm",
+                    "prediction_label": "Evolved LSTM next-day forecast",
+                    "benchmark_symbol": None,
+                    "mean_daily_excess": None,
+                    "benchmark_daily_return": None,
+                    "lookback_days": None,
+                }
+
+        return TrendPredictor._historical_mean_projection(symbol)
+
+    @staticmethod
+    def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30, dropout=0.0, seq_len=20):
         """
         Trains an LSTM on recent data using given hyperparams and returns
         the next-day predicted Close price (unscaled).
@@ -241,10 +397,10 @@ class TrendPredictor:
         """
         try:
             from .evolution import get_train_val_data
-            result = get_train_val_data(symbol, seq_len=20)
+            result = get_train_val_data(symbol, seq_len=seq_len)
             X_train, y_train, X_val, y_val, scaler, input_size = result
 
-            model     = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers)
+            model     = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, dropout=dropout)
             criterion = nn.MSELoss()
             optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -271,7 +427,7 @@ class TrendPredictor:
             return None
 
     @staticmethod
-    def predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30, hyperparams_source='default'):
+    def predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30, dropout=0.0, seq_len=20, hyperparams_source='default'):
         try:
             # ---- Price History ----
             hist_daily  = get_price_history(symbol, period="6mo")
@@ -321,7 +477,7 @@ class TrendPredictor:
             target_data           = financials.copy()
             target_data["Symbol"] = symbol
             peer_data.append(target_data)
-            peer_history[symbol]  = hist_daily["Close"].tolist()
+            peer_history[symbol]  = TrendPredictor._get_close_series(hist_daily).tolist()
 
             for p in peers:
                 try:
@@ -331,7 +487,7 @@ class TrendPredictor:
                     p_fin["Symbol"] = p
                     peer_data.append(p_fin)
                     if p_hist is not None and not p_hist.empty:
-                        peer_history[p] = p_hist["Close"].tolist()
+                        peer_history[p] = TrendPredictor._get_close_series(p_hist).tolist()
                 except Exception:
                     continue
 
@@ -339,10 +495,19 @@ class TrendPredictor:
             if len(hist_daily) < 50:
                 return {"error": "Not enough historical data for technical analysis."}
 
-            close  = hist_daily["Close"]
-            high   = hist_daily["High"]
-            low    = hist_daily["Low"]
-            volume = hist_daily["Volume"]
+            close  = TrendPredictor._get_close_series(hist_daily)
+            
+            def _get_series(df, col):
+                if col in df:
+                    s = df[col]
+                    if isinstance(s, pd.DataFrame):
+                        return s.iloc[:, 0] if s.shape[1] >= 1 else s.squeeze()
+                    return s
+                return pd.Series(dtype=float)
+                
+            high   = _get_series(hist_daily, "High")
+            low    = _get_series(hist_daily, "Low")
+            volume = _get_series(hist_daily, "Volume")
 
             # RSI
             current_rsi = float(
@@ -387,23 +552,48 @@ class TrendPredictor:
             bullish_votes = sum(1 for s in signals if "Bullish" in s or "Oversold" in s)
             bearish_votes = sum(1 for s in signals if "Bearish" in s or "Overbought" in s)
 
-            if bullish_votes > bearish_votes:
-                trend = "UP"
-            elif bearish_votes > bullish_votes:
-                trend = "DOWN"
-            else:
-                trend = "NEUTRAL"
-
-            # LSTM price prediction — uses evolved hyperparams if available
-            lstm_price = TrendPredictor._lstm_predict(
+            forecast = TrendPredictor.forecast_price(
                 symbol,
                 hidden_size=hidden_size,
                 num_layers=num_layers,
                 learning_rate=learning_rate,
-                epochs=epochs
+                epochs=epochs,
+                dropout=dropout,
+                seq_len=seq_len,
+                allow_lstm=(hyperparams_source == "evolved"),
             )
-            predicted_price = lstm_price if lstm_price is not None else recent_close * 1.001
-            last_30_days_prices = hist_daily["Close"].tail(30).tolist()
+            if forecast:
+                ret = forecast.get("expected_return", 0.0)
+                if forecast.get("prediction_method") == "lstm":
+                    ret_30d = ((1.0 + ret) ** 4.28) - 1.0
+                    prediction_label = forecast.get("prediction_label", "") + " (30-day compounded)"
+                else:
+                    ret_30d = ((1.0 + ret) ** 30) - 1.0
+                    prediction_label = forecast.get("prediction_label", "") + " (30-day compounded)"
+                
+                predicted_price = float(recent_close * (1.0 + ret_30d))
+                prediction_method = forecast.get("prediction_method", "") + "_30d"
+            else:
+                predicted_price = float(recent_close)
+                prediction_method = "technical_signal_fallback"
+                prediction_label = "Technical signal fallback"
+
+            if predicted_price is not None:
+                if predicted_price > recent_close:
+                    trend = "UP"
+                elif predicted_price < recent_close:
+                    trend = "DOWN"
+                else:
+                    trend = "NEUTRAL"
+            else:
+                if bullish_votes > bearish_votes:
+                    trend = "UP"
+                elif bearish_votes > bullish_votes:
+                    trend = "DOWN"
+                else:
+                    trend = "NEUTRAL"
+
+            last_30_days_prices = TrendPredictor._get_close_series(hist_daily).tail(30).tolist()
 
             # ---- AI Reasoning ----
             prompt = f"""
@@ -440,7 +630,7 @@ class TrendPredictor:
                 "news":            news,
                 "peer_financials": peer_data,
                 "peer_history":    peer_history,
-                "weekly_data":     hist_weekly["Close"].tolist() if hist_weekly is not None and not hist_weekly.empty else [],
+                "weekly_data":     TrendPredictor._get_close_series(hist_weekly).tolist() if hist_weekly is not None and getattr(hist_weekly, 'empty', False) is False else [],
                 "technicals": {
                     "rsi":     float(current_rsi),
                     "macd":    float(current_macd),
@@ -458,6 +648,8 @@ class TrendPredictor:
                 ),
                 "reasoning": ai_reasoning,
                 "hyperparams_source": hyperparams_source,
+                "prediction_method": prediction_method,
+                "prediction_label": prediction_label,
             }
 
         except Exception as e:
@@ -470,20 +662,175 @@ class TrendPredictor:
 # ---------------------------------------------------------------------------
 
 class PortfolioOptimizer:
+    MAX_SINGLE_WEIGHT = 0.60
+    MIN_BREADTH = 3
+    MIN_POSITION_WEIGHT = 0.01
+
+    @staticmethod
+    def _extract_weight_series(weights_df, tickers):
+        if weights_df is None or getattr(weights_df, "empty", True):
+            raise ValueError("Optimizer returned no weights.")
+
+        if isinstance(weights_df, pd.Series):
+            series = weights_df.astype(float)
+        elif "weights" in weights_df.columns:
+            series = weights_df["weights"].astype(float)
+        else:
+            series = weights_df.iloc[:, 0].astype(float)
+
+        series = series.reindex(tickers).fillna(0.0)
+        return series
+
+    @staticmethod
+    def _normalize_weight_series(weight_series, tickers):
+        series = pd.Series(weight_series, dtype=float).reindex(tickers).fillna(0.0)
+        series = series.clip(lower=0.0)
+        total = float(series.sum())
+        if total <= 1e-10:
+            return pd.Series({t: 1.0 / len(tickers) for t in tickers})
+
+        return series / total
+
+    @staticmethod
+    def _inverse_volatility_weights(cov_matrix, tickers):
+        """Inverse-volatility weighting from a covariance matrix."""
+        vols = pd.Series(np.sqrt(np.diag(cov_matrix.values)), index=cov_matrix.index)
+        inv_vols = (1.0 / vols).replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        return PortfolioOptimizer._normalize_weight_series(inv_vols, tickers)
+
+    @staticmethod
+    def _positive_return_weights(expected_returns_series, tickers):
+        """Weight proportional to positive expected returns only."""
+        pos = pd.Series(expected_returns_series, dtype=float).clip(lower=0.0)
+        return PortfolioOptimizer._normalize_weight_series(pos.reindex(tickers).fillna(0.0), tickers)
+
+    @staticmethod
+    def _enforce_min_breadth(weight_series, tickers):
+        series = PortfolioOptimizer._normalize_weight_series(weight_series, tickers)
+
+        if len(tickers) < PortfolioOptimizer.MIN_BREADTH:
+            return series
+
+        top_tickers = list(series.sort_values(ascending=False).index[:PortfolioOptimizer.MIN_BREADTH])
+        adjusted = series.copy()
+
+        for ticker in top_tickers:
+            adjusted.loc[ticker] = max(
+                float(adjusted.loc[ticker]),
+                PortfolioOptimizer.MIN_POSITION_WEIGHT,
+            )
+
+        min_allowed = pd.Series(0.0, index=adjusted.index)
+        min_allowed.loc[top_tickers] = PortfolioOptimizer.MIN_POSITION_WEIGHT
+        excess = float(adjusted.sum() - 1.0)
+
+        if excess > 1e-10:
+            headroom = (adjusted - min_allowed).clip(lower=0.0)
+            headroom_total = float(headroom.sum())
+            if headroom_total <= 1e-10:
+                return PortfolioOptimizer._normalize_weight_series(series, tickers)
+            adjusted -= headroom / headroom_total * excess
+
+        return PortfolioOptimizer._normalize_weight_series(adjusted, tickers)
+
+    @staticmethod
+    def _apply_max_weight_cap(weight_series, tickers):
+        series = PortfolioOptimizer._normalize_weight_series(weight_series, tickers)
+        max_weight = PortfolioOptimizer.MAX_SINGLE_WEIGHT
+
+        for _ in range(len(tickers) + 2):
+            over_cap = series > max_weight + 1e-10
+            if not over_cap.any():
+                break
+
+            capped = series.copy()
+            capped.loc[over_cap] = max_weight
+            excess = float(1.0 - capped.sum())
+            if excess <= 1e-10:
+                series = PortfolioOptimizer._normalize_weight_series(capped, tickers)
+                continue
+
+            under_cap = capped < max_weight - 1e-10
+            if not under_cap.any():
+                series = PortfolioOptimizer._normalize_weight_series(capped, tickers)
+                break
+
+            redistribution_base = series.loc[under_cap].clip(lower=0.0)
+            redistribution_total = float(redistribution_base.sum())
+            if redistribution_total <= 1e-10:
+                redistribution_base = pd.Series(
+                    1.0,
+                    index=capped.index[under_cap],
+                    dtype=float,
+                )
+                redistribution_total = float(redistribution_base.sum())
+
+            capped.loc[under_cap] += redistribution_base / redistribution_total * excess
+            series = PortfolioOptimizer._normalize_weight_series(capped, tickers)
+
+        return series.clip(upper=max_weight)
+
+    @staticmethod
+    def _stabilize_weight_series(weight_series, tickers):
+        return PortfolioOptimizer._normalize_weight_series(weight_series, tickers)
+
+    @staticmethod
+    def _build_result(
+        requested_tickers,
+        valid_tickers,
+        allocation,
+        source,
+        blend_meta=None,
+        fallback_reason=None,
+    ):
+        ordered_allocation = {
+            ticker: round(float(pd.Series(allocation, dtype=float).reindex(valid_tickers).fillna(0.0).loc[ticker]), 4)
+            for ticker in valid_tickers
+        }
+        return {
+            "allocation": ordered_allocation,
+            "requested_tickers": requested_tickers,
+            "valid_tickers": valid_tickers,
+            "dropped_tickers": [ticker for ticker in requested_tickers if ticker not in valid_tickers],
+            "source": source,
+            "blend_meta": blend_meta or {},
+            "fallback_reason": fallback_reason,
+            "constraints": {
+                "max_single_weight": 1.0,
+                "min_positions_over_one_pct": 2,
+            },
+        }
+
+    @staticmethod
+    def _blend_profiles(conservative, balanced, aggressive, risk_tolerance):
+        risk_tolerance = float(np.clip(risk_tolerance, 0.0, 1.0))
+        if risk_tolerance <= 0.5:
+            alpha = risk_tolerance / 0.5
+            blended = conservative * (1.0 - alpha) + balanced * alpha
+            blend_meta = {"from": "HRP", "to": "Min CVaR", "alpha": round(alpha, 4)}
+        else:
+            alpha = (risk_tolerance - 0.5) / 0.5
+            blended = balanced * (1.0 - alpha) + aggressive * alpha
+            blend_meta = {"from": "Min CVaR", "to": "Max Sharpe", "alpha": round(alpha, 4)}
+        return blended, blend_meta
+
     @staticmethod
     def optimize(tickers, risk_tolerance):
         """
-        risk_tolerance 0.0 – 0.33 → HRP  (Hierarchical Risk Parity)
-        risk_tolerance 0.34 – 0.66 → Min CVaR (Conditional Value at Risk)
-        risk_tolerance 0.67 – 1.0  → Max Sharpe (Mean-Variance)
-        Falls back to equal-weight if data is insufficient.
+        Builds conservative, balanced, and aggressive portfolios, then blends
+        them continuously so allocations respond smoothly to risk_tolerance.
         """
+        requested_tickers = [str(t).upper() for t in tickers]
         try:
+            import riskfolio as rp
+
             frames = {}
-            for t in tickers:
+            for t in requested_tickers:
                 hist = get_price_history(t, period="2y")
                 if hist is not None and not hist.empty:
-                    frames[t] = hist["Close"]
+                    close = TrendPredictor._get_close_series(hist)
+                    if not close.empty:
+                        frames[t] = close
 
             if len(frames) < 2:
                 raise ValueError("Need at least 2 tickers with data.")
@@ -492,40 +839,257 @@ class PortfolioOptimizer:
             if len(prices) < 60:
                 raise ValueError("Not enough historical data.")
 
-            returns = prices.pct_change().dropna()
+            daily_returns = prices.pct_change().dropna()
+            valid_tickers = list(daily_returns.columns)
 
-            if risk_tolerance < 0.34:
-                # HRP — best diversification, no matrix inversion needed
-                hrp     = rp.HCPortfolio(returns=returns)
-                w       = hrp.optimization(
-                    model="HRP", codependence="pearson",
-                    rm="MV", rf=0, linkage="ward",
-                    max_k=10, leaf_order=True
-                )
-                weights = w["weights"].to_dict()
+            # Build Riskfolio Portfolio
+            port = rp.Portfolio(returns=daily_returns)
+            port.assets_stats(method_mu='hist', method_cov='hist')
 
-            elif risk_tolerance < 0.67:
-                # Minimum CVaR — controls tail risk
-                port = rp.Portfolio(returns=returns)
-                port.assets_stats(method_mu="hist", method_cov="hist")
-                w = port.optimization(
-                    model="Classic", rm="CVaR", obj="MinRisk",
-                    rf=0.05, l=0, hist=True
-                )
-                weights = w["weights"].to_dict()
+            def extract_rp_weights(w_df):
+                if w_df is None or w_df.empty:
+                    return None
+                return w_df['weights'].squeeze()
 
+            # Conservative: Minimum Volatility
+            w_opt_cons = port.optimization(model='Classic', rm='MV', obj='MinRisk', rf=0.0, l=0, hist=True)
+            conservative_raw = extract_rp_weights(w_opt_cons)
+            if conservative_raw is None:
+                conservative_raw = pd.Series(1.0 / len(valid_tickers), index=valid_tickers)
+            conservative = PortfolioOptimizer._normalize_weight_series(conservative_raw, valid_tickers)
+
+            # Balanced: Max Sharpe
+            w_opt_bal = port.optimization(model='Classic', rm='MV', obj='Sharpe', rf=0.02/252, l=0, hist=True)
+            balanced_raw = extract_rp_weights(w_opt_bal)
+            if balanced_raw is None:
+                balanced_raw = conservative
+            balanced = PortfolioOptimizer._normalize_weight_series(balanced_raw, valid_tickers)
+
+            # Aggressive: Max Utility (low risk aversion)
+            w_opt_agg = port.optimization(model='Classic', rm='MV', obj='Utility', rf=0.0, l=0.5, hist=True)
+            aggressive_raw = extract_rp_weights(w_opt_agg)
+            if aggressive_raw is None:
+                aggressive_raw = balanced
+            aggressive = PortfolioOptimizer._normalize_weight_series(aggressive_raw, valid_tickers)
+
+            blended, blend_meta = PortfolioOptimizer._blend_profiles(
+                conservative,
+                balanced,
+                aggressive,
+                risk_tolerance,
+            )
+            cleaned = PortfolioOptimizer._stabilize_weight_series(blended, valid_tickers)
+            return PortfolioOptimizer._build_result(
+                requested_tickers=requested_tickers,
+                valid_tickers=valid_tickers,
+                allocation=cleaned,
+                source="risk_based",
+                blend_meta=blend_meta,
+                fallback_reason=None,
+            )
+
+        except Exception as exc:
+            valid_tickers = requested_tickers[:]
+            if not valid_tickers:
+                valid_tickers = ["SPY"]
+            fallback_weights = pd.Series(
+                {ticker: 1.0 / len(valid_tickers) for ticker in valid_tickers},
+                dtype=float,
+            )
+            return PortfolioOptimizer._build_result(
+                requested_tickers=requested_tickers or valid_tickers,
+                valid_tickers=valid_tickers,
+                allocation=fallback_weights,
+                source="risk_based",
+                blend_meta={},
+                fallback_reason=str(exc),
+            )
+
+
+class RLPortfolioAgent:
+    AGENT_WEIGHTS     = {"A2C": 0.35, "SAC": 0.30, "TD3": 0.35}
+    HPO_MIN_TIMESTEPS = 10000
+    MODEL_DIR         = os.path.join(os.path.dirname(__file__), "rl_models")
+    PROGRESS_DIR      = os.path.join(os.path.dirname(__file__), "rl_progress")
+    HPO_CACHE_DIR     = os.path.join(os.path.dirname(__file__), "rl_hpo_cache")
+
+    def __init__(self):
+        os.makedirs(self.MODEL_DIR,    exist_ok=True)
+        os.makedirs(self.PROGRESS_DIR, exist_ok=True)
+        os.makedirs(self.HPO_CACHE_DIR, exist_ok=True)
+
+    def _hpo_cache_path(self, tickers):
+        return os.path.join(self.HPO_CACHE_DIR, f"{_ticker_hash(tickers)}.json")
+
+    def _load_hpo_cache(self, tickers):
+        path = self._hpo_cache_path(tickers)
+        if os.path.exists(path):
+            try:
+                with open(path) as fh: return json.load(fh)
+            except Exception: pass
+        return None
+
+    def _save_hpo_cache(self, tickers, hpo_results):
+        with open(self._hpo_cache_path(tickers), "w") as fh:
+            json.dump(hpo_results, fh, indent=2)
+
+    def _ticker_hash_for_response(self, tickers):
+        return _ticker_hash(tickers)
+
+    def _fetch_data(self, tickers, period="2y"):
+        frames = {}
+        for t in tickers:
+            try:
+                hist = yf.Ticker(t).history(period=period)
+                if not hist.empty:
+                    hist.index = pd.to_datetime(hist.index.date)
+                    frames[t] = hist["Close"]
+            except Exception: continue
+        if len(frames) < 2:
+            raise ValueError("Need at least 2 tickers with valid data.")
+        df = pd.DataFrame(frames).ffill().dropna()
+        if len(df) < 60:
+            raise ValueError("Not enough aligned data.")
+        return df
+
+    def _write_progress(self, progress_file, progress, status, timestep=0, total_timesteps=0, reward=0, extra=None):
+        data = {"progress": round(progress, 1), "status": status,
+                "timestep": timestep, "total_timesteps": total_timesteps,
+                "reward": round(float(reward), 4)}
+        if extra: data.update(extra)
+        with open(progress_file, "w") as fh: json.dump(data, fh)
+
+    def train(self, tickers, timesteps=10000, session_id="default", use_hpo=True):
+        if not GYM_AVAILABLE or not SB3_AVAILABLE:
+            raise ImportError("Install: pip install stable-baselines3 gymnasium")
+        progress_file = os.path.join(self.PROGRESS_DIR, f"{session_id}.json")
+        self._write_progress(progress_file, 0, "fetching_data", total_timesteps=timesteps)
+        price_data = self._fetch_data(tickers)
+        self._write_progress(progress_file, 0, "fetching_fundamentals", total_timesteps=timesteps)
+        ticker_features = fetch_ticker_features(tickers)
+
+        evolved_hyperparams = None
+        if use_hpo and timesteps >= self.HPO_MIN_TIMESTEPS:
+            cached_hpo = self._load_hpo_cache(tickers)
+            if cached_hpo:
+                evolved_hyperparams = cached_hpo
+                self._write_progress(progress_file, 5, "hpo_loaded_from_cache", total_timesteps=timesteps)
             else:
-                # Maximum Sharpe — aggressive growth
-                port = rp.Portfolio(returns=returns)
-                port.assets_stats(method_mu="hist", method_cov="hist")
-                w = port.optimization(
-                    model="Classic", rm="MV", obj="Sharpe",
-                    rf=0.05, l=0, hist=True
-                )
-                weights = w["weights"].to_dict()
+                self._write_progress(progress_file, 2, "hpo_running", total_timesteps=timesteps)
+                try:
+                    from .evolution import run_rl_hpo_all_agents
+                    hpo_results = run_rl_hpo_all_agents(price_data, ticker_features, pop_size=3, generations=2, eval_timesteps=500)
+                    evolved_hyperparams = {a: r["hyperparams"] for a, r in hpo_results.items() if r.get("hyperparams") is not None}
+                    self._save_hpo_cache(tickers, evolved_hyperparams)
+                    self._write_progress(progress_file, 20, "hpo_complete", total_timesteps=timesteps,
+                                         extra={"hpo_source": "evolved", "evolved_hyperparams": evolved_hyperparams})
+                except Exception as e:
+                    evolved_hyperparams = None
+                    self._write_progress(progress_file, 20, "hpo_skipped", total_timesteps=timesteps, extra={"hpo_error": str(e)})
 
-            return {k: round(float(v), 4) for k, v in weights.items() if float(v) > 0.001}
+        hpo_offset  = 20.0 if evolved_hyperparams is not None else 0.0
+        agent_share = (99.0 - hpo_offset) / 3.0 / 100.0
+        trained_models = {}
+        all_rewards    = {}
 
-        except Exception:
-            n = len(tickers)
-            return {t: round(1.0 / n, 4) for t in tickers}
+        for agent_name, rel_offset in [("A2C", 0), ("SAC", agent_share), ("TD3", 2 * agent_share)]:
+            abs_offset = (hpo_offset + rel_offset * 100) / 100.0
+            self._write_progress(progress_file, hpo_offset + rel_offset * 100, f"training_{agent_name}",
+                                  total_timesteps=timesteps, extra={"current_agent": agent_name})
+            hp  = (evolved_hyperparams or {}).get(agent_name)
+            vec = DummyVecEnv([lambda: PortfolioEnv(price_data, ticker_features)])
+            cb  = ProgressCallback(timesteps, progress_file, offset_pct=abs_offset, scale_pct=agent_share)
+            if agent_name == "A2C":
+                model = _make_a2c(vec, hyperparams=hp)
+            elif agent_name == "SAC":
+                model = _make_sac(PortfolioEnv(price_data, ticker_features), len(tickers), hyperparams=hp)
+            else:
+                model = _make_td3(PortfolioEnv(price_data, ticker_features), len(tickers), hyperparams=hp)
+            model.learn(total_timesteps=timesteps, callback=cb)
+            model.save(os.path.join(self.MODEL_DIR, f"{session_id}_{agent_name}"))
+            trained_models[agent_name] = model
+            all_rewards[agent_name]    = float(cb.current_reward)
+
+        self._write_progress(progress_file, 99, "evaluating", total_timesteps=timesteps)
+        agent_allocs   = {}
+        agent_histories = {}
+        agent_dates    = {}
+        for agent_name, model in trained_models.items():
+            alloc, hist, dates = self._evaluate_single(model, price_data, ticker_features)
+            agent_allocs[agent_name]    = alloc
+            agent_histories[agent_name] = hist
+            agent_dates[agent_name]     = dates
+
+        ensemble_weights = np.zeros(len(tickers))
+        for agent_name, w in self.AGENT_WEIGHTS.items():
+            if agent_name in agent_allocs:
+                arr = np.array([agent_allocs[agent_name].get(t, 0.0) for t in tickers])
+                ensemble_weights += w * arr
+        ensemble_weights = _cap_and_renormalize(ensemble_weights / (ensemble_weights.sum() + 1e-8))
+        ensemble_alloc   = {t: round(float(w), 4) for t, w in zip(tickers, ensemble_weights)}
+
+        primary_hist  = agent_histories["A2C"]
+        final_value   = primary_hist[-1] if primary_hist else 100000
+        total_return  = ((final_value / 100000) - 1) * 100
+
+        agent_metrics = {}
+        for agent_name, hist in agent_histories.items():
+            if len(hist) > 1:
+                rets = np.diff(hist) / (np.array(hist[:-1]) + 1e-8)
+                agent_metrics[agent_name] = {
+                    "final_value":  round(hist[-1], 2),
+                    "total_return": round((hist[-1] / 100000 - 1) * 100, 2),
+                    "sharpe":       round(float(np.mean(rets) / (np.std(rets) + 1e-8) * np.sqrt(252)), 3),
+                    "sortino":      round(_sortino_ratio(rets), 3),
+                    "max_drawdown": round(float(self._max_drawdown(hist)), 4),
+                    "allocation":   agent_allocs[agent_name],
+                }
+
+        result = {
+            "progress": 100, "status": "complete",
+            "timestep": timesteps, "total_timesteps": timesteps,
+            "reward":   float(np.mean(list(all_rewards.values()))),
+            "allocation": ensemble_alloc,
+            "portfolio_history": primary_hist,
+            "portfolio_dates":   agent_dates["A2C"],
+            "tickers": tickers,
+            "ticker_features": {t: {k: round(v, 3) for k, v in fm.items()} for t, fm in ticker_features.items()},
+            "agent_metrics": agent_metrics,
+            "final_value": final_value,
+            "total_return": total_return,
+            "hpo_used": evolved_hyperparams is not None,
+            "hpo_source": "evolved" if evolved_hyperparams is not None else "defaults",
+            "evolved_hyperparams": evolved_hyperparams or {},
+        }
+        with open(progress_file, "w") as fh: json.dump(result, fh)
+        return result
+
+    def _evaluate_single(self, model, price_data, ticker_features):
+        env = PortfolioEnv(price_data, ticker_features)
+        obs, _ = env.reset()
+        done = False
+        while not done:
+            action, _ = model.predict(obs, deterministic=True)
+            obs, _, done, _, _ = env.step(action)
+        allocation = {t: round(float(w), 4) for t, w in zip(price_data.columns, env.weights)}
+        history    = [round(v, 2) for v in env.portfolio_history]
+        start_idx  = env.WINDOW
+        date_index = price_data.index[start_idx:start_idx + len(history)]
+        dates = [str(d.date()) if hasattr(d, "date") else str(d) for d in date_index]
+        while len(dates) < len(history): dates.append("")
+        return allocation, history, dates
+
+    def _max_drawdown(self, history):
+        arr  = np.array(history)
+        peak = np.maximum.accumulate(arr)
+        return float(((peak - arr) / (peak + 1e-8)).max())
+
+    def get_progress(self, session_id):
+        pf = os.path.join(self.PROGRESS_DIR, f"{session_id}.json")
+        if not os.path.exists(pf):
+            return {"progress": 0, "status": "not_started"}
+        with open(pf) as fh: return json.load(fh)
+
+
+_rl_agent = RLPortfolioAgent()
+# trigger reload

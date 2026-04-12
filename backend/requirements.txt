@@ -1,4 +1,4 @@
-# QuantVis Backend Dependencies
+# Stock Price Predictor Backend Dependencies
 # Updated: replaced tensorflow, nsepython, sentence-transformers
 # with modern maintained alternatives
 
@@ -23,15 +23,13 @@ torchvision
 
 # Portfolio Optimisation (Riskfolio-Lib — HRP, CVaR, Mean-Variance)
 Riskfolio-Lib
+PyPortfolioOpt==1.5.5
 
 # AI / LLM
 groq
 
 # Embeddings (replaced sentence-transformers — 10x faster, no 400MB download)
 fastembed
-
-# NSE Options Data (replaced nsepython scraper — uses official NSE endpoints)
-jugaad-data
 
 # Reporting
 quant-reporter
@@ -46,3 +44,8 @@ ta
 # Utilities
 statsmodels
 python-dotenv
+celery==5.3.6
+redis==5.0.1
+django-celery-beat==2.6.0
+
+django-cors-headers==4.9.0

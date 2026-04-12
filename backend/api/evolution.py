@@ -13,6 +13,15 @@ def get_train_val_data(symbol="AAPL", seq_len=20):
     if df is None or df.empty:
         raise ValueError(f"Not enough data for {symbol}")
 
+    # Resample to weekly frequency — reduces noise, improves directional signal
+    df = df.resample('W').agg({
+        'Open':   'first',
+        'High':   'max',
+        'Low':    'min',
+        'Close':  'last',
+        'Volume': 'sum'
+    }).dropna()
+
     close = df['Close']
     high  = df['High']
     low   = df['Low']
@@ -27,8 +36,11 @@ def get_train_val_data(symbol="AAPL", seq_len=20):
     df['atr']        = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
     sma20            = ta.trend.SMAIndicator(close=close, window=20).sma_indicator()
     df['sma_dist']   = (close - sma20) / sma20
+    df['obv'] = ta.volume.OnBalanceVolumeIndicator(
+        close=df['Close'], volume=df['Volume']
+    ).on_balance_volume()
 
-    feature_cols = ['Close', 'rsi', 'macd_diff', 'bb_width', 'atr', 'sma_dist']
+    feature_cols = ['Close', 'rsi', 'macd_diff', 'bb_width', 'atr', 'sma_dist', 'obv']
     df = df[feature_cols].dropna()
 
     scaler      = MinMaxScaler(feature_range=(0, 1))
@@ -57,12 +69,15 @@ def get_train_val_data(symbol="AAPL", seq_len=20):
     )
 
 
-def evaluate_chromosome(chromosome, data_tensors, input_size):
-    hidden_size, num_layers, lr, epochs = chromosome
+def evaluate_chromosome(chromosome, symbol, input_size=None):
+    hidden_size, num_layers, lr, epochs, dropout, seq_len = chromosome
+    result = get_train_val_data(symbol, seq_len=seq_len)
+    data_tensors = result[:4]
+    input_size = result[5]
     X_train, y_train, X_val, y_val = data_tensors
 
     # Initialize the model using the same class used in our standard predictions
-    model = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers)
+    model = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, dropout=dropout)
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -105,26 +120,24 @@ def evolutionary_hpo_generator(symbol="AAPL", pop_size=5, generations=5, mutatio
     Generator function that evaluates an entire population generation by generation.
     It yields the state of the EA back to the caller as JSON newline streams.
     """
-    try:
-        result       = get_train_val_data(symbol, seq_len=20)
-        data_tensors = result[:4]
-        input_size   = result[5]
-    except Exception as e:
-        yield json.dumps({"error": str(e)}) + "\n\n"
-        return
+    pass
 
     # Chromosome representation:
-    # Index 0: hidden_size (10 to 100)
-    # Index 1: num_layers (1 to 3)
-    # Index 2: lr (0.001 to 0.05)
-    # Index 3: epochs (10 to 50)
+    # Index 0: hidden_size (10 to 128)
+    # Index 1: num_layers (1 to 4)
+    # Index 2: lr (0.0005 to 0.05)
+    # Index 3: epochs (10 to 60)
+    # Index 4: dropout (0.0 to 0.5)
+    # Index 5: seq_len (10 to 60)
     population = []
     for _ in range(pop_size):
         population.append([
-            random.randint(10, 100),
-            random.randint(1, 3),
-            round(random.uniform(0.001, 0.05), 4),
-            random.randint(10, 50)
+            random.randint(10, 128),
+            random.randint(1, 4),
+            round(random.uniform(0.0005, 0.05), 4),
+            random.randint(10, 60),
+            round(random.uniform(0.0, 0.5), 2),
+            random.randint(10, 60)
         ])
 
     best_overall_composite   = float('inf')
@@ -133,11 +146,18 @@ def evolutionary_hpo_generator(symbol="AAPL", pop_size=5, generations=5, mutatio
     best_overall_chromosome  = None
 
     for gen in range(1, generations + 1):
+        adaptive_mutation = mutation_rate * (1 - (gen - 1) / generations)
+        adaptive_mutation = max(adaptive_mutation, 0.05)  # floor at 5%
+
         fitnesses  = []
         accuracies = []
         composites = []
         for ind in population:
-            loss, acc, composite = evaluate_chromosome(ind, data_tensors, input_size)
+            try:
+                loss, acc, composite = evaluate_chromosome(ind, symbol)
+            except Exception:
+                loss, acc, composite = float('inf'), 0.0, float('inf')
+            
             fitnesses.append(loss)
             accuracies.append(acc)
             composites.append(composite)
@@ -169,7 +189,9 @@ def evolutionary_hpo_generator(symbol="AAPL", pop_size=5, generations=5, mutatio
                 "hidden_size": current_best_ind[0],
                 "num_layers": current_best_ind[1],
                 "learning_rate": current_best_ind[2],
-                "epochs": current_best_ind[3]
+                "epochs": current_best_ind[3],
+                "dropout": current_best_ind[4],
+                "seq_len": current_best_ind[5]
             },
             "population": [
                 {"chromosome": c, "loss": f, "accuracy": a, "composite": comp}
@@ -194,16 +216,18 @@ def evolutionary_hpo_generator(symbol="AAPL", pop_size=5, generations=5, mutatio
             p2 = population[idx3] if composites[idx3] < composites[idx4] else population[idx4]
 
             # Single-point crossover
-            pt = random.randint(1, 3)
+            pt = random.randint(1, 5)
             child = p1[:pt] + p2[pt:]
 
             # Mutation logic
-            if random.random() < mutation_rate:
-                mut_idx = random.randint(0, 3)
-                if mut_idx == 0:   child[0] = random.randint(10, 100)
-                elif mut_idx == 1: child[1] = random.randint(1, 3)
-                elif mut_idx == 2: child[2] = round(random.uniform(0.001, 0.05), 4)
-                elif mut_idx == 3: child[3] = random.randint(10, 50)
+            if random.random() < adaptive_mutation:
+                mut_idx = random.randint(0, 5)
+                if mut_idx == 0: child[0] = random.randint(10, 128)
+                elif mut_idx == 1: child[1] = random.randint(1, 4)
+                elif mut_idx == 2: child[2] = round(random.uniform(0.0005, 0.05), 4)
+                elif mut_idx == 3: child[3] = random.randint(10, 60)
+                elif mut_idx == 4: child[4] = round(random.uniform(0.0, 0.5), 2)
+                elif mut_idx == 5: child[5] = random.randint(10, 60)
 
             next_population.append(child)
 
@@ -219,7 +243,9 @@ def evolutionary_hpo_generator(symbol="AAPL", pop_size=5, generations=5, mutatio
             "hidden_size": best_overall_chromosome[0],
             "num_layers": best_overall_chromosome[1],
             "learning_rate": best_overall_chromosome[2],
-            "epochs": best_overall_chromosome[3]
+            "epochs": best_overall_chromosome[3],
+            "dropout": best_overall_chromosome[4],
+            "seq_len": best_overall_chromosome[5]
         }
     }) + "\n\n"
 
@@ -232,6 +258,8 @@ def evolutionary_hpo_generator(symbol="AAPL", pop_size=5, generations=5, mutatio
             num_layers           = best_overall_chromosome[1],
             learning_rate        = best_overall_chromosome[2],
             epochs               = best_overall_chromosome[3],
+            dropout              = best_overall_chromosome[4],
+            seq_len              = best_overall_chromosome[5],
             val_mse              = best_overall_fitness_mse,
             directional_accuracy = best_overall_accuracy,
             composite_fitness    = best_overall_composite
