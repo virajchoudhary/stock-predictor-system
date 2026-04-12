@@ -7,7 +7,7 @@ from components.style import inject_css
 API_URL = "http://127.0.0.1:8000/api"
 
 st.set_page_config(
-    page_title="QuantVis",
+    page_title="Stock Price Predictor",
     page_icon="▲",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -19,11 +19,11 @@ st.markdown("""
 <div style="padding:2.5rem 0 2rem 0;border-bottom:1px solid #1E2D3D;margin-bottom:2.5rem;">
     <div style="font-family:'IBM Plex Mono',monospace;font-size:0.58rem;letter-spacing:0.25em;
     color:#7A9BB5;text-transform:uppercase;margin-bottom:0.6rem;">
-        Quantitative Finance Platform — v2
+        Stock Price Predictor
     </div>
     <h1 style="font-family:'IBM Plex Mono',monospace;font-size:2.2rem;font-weight:300;
     color:#E8F4FD;margin:0 0 0.8rem 0;letter-spacing:-0.02em;">
-        QuantVis
+        Stock Price Predictor
     </h1>
     <p style="font-family:'IBM Plex Sans',sans-serif;font-size:0.88rem;color:#7A9BB5;
     margin:0;max-width:560px;line-height:1.75;">

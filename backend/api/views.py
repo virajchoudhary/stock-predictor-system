@@ -1,9 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+import threading
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from .ai_services import GroqService, TrendPredictor, PortfolioOptimizer
+from rest_framework.decorators import api_view
+from .ai_services import GroqService, TrendPredictor, PortfolioOptimizer, RLPortfolioAgent
 from django.http import StreamingHttpResponse
+
+_rl_agent = RLPortfolioAgent()
 
 
 def _timed_call(func, timeout_seconds, fallback):
@@ -108,6 +112,12 @@ class HPOStatusView(APIView):
 class BLOptimizationView(APIView):
     def post(self, request):
         tickers = request.data.get('tickers', [])
+        try:
+            risk_tolerance = float(request.data.get('risk_tolerance', 0.5))
+        except (TypeError, ValueError):
+            risk_tolerance = 0.5
+        risk_tolerance = max(0.0, min(1.0, risk_tolerance))
+
         if not tickers or len(tickers) < 2:
             return Response(
                 {'error': 'At least 2 tickers required.'},
@@ -122,7 +132,7 @@ class BLOptimizationView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        result = run_black_litterman(tickers)
+        result = run_black_litterman(tickers, risk_tolerance)
 
         if result.get("error"):
             return Response({'error': result["error"]}, status=status.HTTP_400_BAD_REQUEST)
@@ -133,6 +143,7 @@ class BLOptimizationView(APIView):
         allocation in plain English in 3-4 sentences.
 
         Tickers: {tickers}
+        Risk tolerance: {risk_tolerance:.2f} (0=conservative, 1=aggressive)
 
         LSTM-based views (what the AI predicts for each stock):
         {result['view_details']}
@@ -205,3 +216,82 @@ class SWOTAnalysisView(APIView):
             return Response({'error': result["error"]}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RL Ensemble — Train (async) + Progress poll + HPO cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _coerce_bool(value, default=True):
+    if value is None: return default
+    if isinstance(value, bool): return value
+    if isinstance(value, (int, float)): return bool(value)
+    if isinstance(value, str):
+        if value.strip().lower() in {"1", "true", "yes", "on"}:  return True
+        if value.strip().lower() in {"0", "false", "no", "off"}: return False
+    return default
+
+
+@api_view(['POST'])
+def train_rl_agent(request):
+    try:
+        tickers    = request.data.get('tickers', [])
+        timesteps  = int(request.data.get('timesteps', 10000))
+        session_id = request.data.get('session_id', 'default')
+        use_hpo    = _coerce_bool(request.data.get('use_hpo', True))
+        if not tickers or len(tickers) < 2:
+            return Response({'error': 'Provide at least 2 tickers.'}, status=400)
+
+        def run_training():
+            try:
+                _rl_agent.train(tickers, timesteps=timesteps, session_id=session_id, use_hpo=use_hpo)
+            except Exception as exc:
+                import json as _json, os as _os
+                pf = _os.path.join(_rl_agent.PROGRESS_DIR, f"{session_id}.json")
+                with open(pf, 'w') as fh:
+                    _json.dump({'progress': 0, 'status': 'error', 'error': str(exc)}, fh)
+
+        threading.Thread(target=run_training, daemon=True).start()
+        return Response({'status': 'started', 'session_id': session_id,
+                         'hpo_enabled': use_hpo and timesteps >= _rl_agent.HPO_MIN_TIMESTEPS})
+    except Exception as exc:
+        return Response({'error': str(exc)}, status=500)
+
+
+@api_view(['GET'])
+def rl_progress(request, session_id):
+    try:
+        return Response(_rl_agent.get_progress(session_id))
+    except Exception as exc:
+        return Response({'error': str(exc)}, status=500)
+
+
+@api_view(['GET'])
+def rl_hpo_cache_status(request):
+    try:
+        tickers = [t.strip() for t in request.query_params.get('tickers', '').split(',') if t.strip()]
+        if len(tickers) < 2:
+            return Response({'error': 'Provide at least 2 tickers.'}, status=400)
+        cached = _rl_agent._load_hpo_cache(tickers)
+        if cached:
+            return Response({'cached': True, 'ticker_hash': _rl_agent._ticker_hash_for_response(tickers),
+                             'agents_evolved': list(cached.keys()), 'evolved_hyperparams': cached})
+        return Response({'cached': False, 'tickers': tickers})
+    except Exception as exc:
+        return Response({'error': str(exc)}, status=500)
+
+
+@api_view(['DELETE'])
+def rl_hpo_cache_clear(request):
+    try:
+        tickers = request.data.get('tickers', [])
+        if len(tickers) < 2:
+            return Response({'error': 'Provide at least 2 tickers.'}, status=400)
+        import os as _os
+        path = _rl_agent._hpo_cache_path(tickers)
+        if _os.path.exists(path):
+            _os.remove(path)
+            return Response({'status': 'cleared', 'tickers': tickers})
+        return Response({'status': 'no_cache', 'tickers': tickers})
+    except Exception as exc:
+        return Response({'error': str(exc)}, status=500)

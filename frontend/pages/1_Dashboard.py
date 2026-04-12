@@ -9,7 +9,7 @@ from components.style import inject_css, page_header, section_label
 
 API_URL = "http://127.0.0.1:8000/api"
 
-st.set_page_config(page_title="Dashboard — QuantVis", page_icon="▲", layout="wide")
+st.set_page_config(page_title="Dashboard - Stock Price Predictor", page_icon="▲", layout="wide")
 
 inject_css()
 page_header("Market Intelligence", "Dashboard")

@@ -14,3 +14,9 @@ frontend/venv/
 logs/
 *.log
 
+# RL runtime artifacts
+backend/api/rl_models/
+backend/api/rl_progress/
+backend/api/rl_hpo_cache/
+ppo_portfolio_model.zip
+.cache/

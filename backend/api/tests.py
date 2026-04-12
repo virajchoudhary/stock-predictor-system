@@ -1,9 +1,12 @@
 import numpy as np
 import pandas as pd
+import re
 import sys
 from pathlib import Path
 from django.test import SimpleTestCase
 from unittest.mock import patch
+from django.db.utils import OperationalError, ProgrammingError
+from rest_framework.test import APIRequestFactory
 
 from .ai_services import PortfolioOptimizer, TrendPredictor
 from .black_scholes import bs_call_price, bs_put_price, greeks, implied_volatility
@@ -14,6 +17,7 @@ from .bl_numpy import (
     run_bl_analysis,
     select_market_benchmark,
 )
+from .models import SearchedTicker
 from .tasks import queue_ga_for_ticker
 
 FRONTEND_ROOT = Path(__file__).resolve().parents[2] / "frontend"
@@ -166,6 +170,153 @@ class PortfolioOptimizerBlendTests(SimpleTestCase):
         self.assertLessEqual(float(weights.max()), PortfolioOptimizer.MAX_SINGLE_WEIGHT + 1e-6)
         self.assertGreaterEqual(int((weights >= PortfolioOptimizer.MIN_POSITION_WEIGHT).sum()), 3)
 
+    @patch("api.ai_services.get_price_history")
+    def test_optimize_changes_meaningfully_across_risk_levels(self, mock_get_price_history):
+        dates = pd.date_range("2025-01-01", periods=260, freq="B")
+        steps = np.arange(len(dates), dtype=float)
+        histories = {
+            "AAPL": 100 * np.cumprod(1 + 0.00055 + 0.00025 * np.sin(steps / 17)),
+            "MSFT": 95 * np.cumprod(1 + 0.00045 + 0.00020 * np.cos(steps / 19)),
+            "GOOG": 90 * np.cumprod(1 + 0.00100 + 0.00120 * np.sin(steps / 9)),
+            "TSLA": 80 * np.cumprod(1 + 0.00190 + 0.00450 * np.sin(steps / 5)),
+        }
+
+        def fake_history(symbol, period="2y"):
+            close = histories.get(symbol)
+            if close is None:
+                return pd.DataFrame()
+            return pd.DataFrame({"Close": close}, index=dates)
+
+        mock_get_price_history.side_effect = fake_history
+
+        low = pd.Series(PortfolioOptimizer.optimize(["AAPL", "MSFT", "GOOG", "TSLA"], 0.0)["allocation"])
+        mid = pd.Series(PortfolioOptimizer.optimize(["AAPL", "MSFT", "GOOG", "TSLA"], 0.5)["allocation"])
+        high = pd.Series(PortfolioOptimizer.optimize(["AAPL", "MSFT", "GOOG", "TSLA"], 1.0)["allocation"])
+
+        self.assertAlmostEqual(float(low.sum()), 1.0, places=3)
+        self.assertAlmostEqual(float(mid.sum()), 1.0, places=3)
+        self.assertAlmostEqual(float(high.sum()), 1.0, places=3)
+        self.assertGreater(high["TSLA"], low["TSLA"])
+        self.assertGreater(low["AAPL"], high["AAPL"])
+        self.assertGreaterEqual(float((low - high).abs().max()), 0.05)
+        self.assertGreaterEqual(float((low - high).abs().sum()), 0.20)
+
+
+class BlackLittermanAllocatorTests(SimpleTestCase):
+    @patch("api.bl_optimizer.build_views")
+    @patch("api.bl_optimizer.get_market_caps")
+    @patch("api.bl_optimizer.get_price_history")
+    def test_run_black_litterman_changes_meaningfully_across_risk_levels(
+        self,
+        mock_get_price_history,
+        mock_get_market_caps,
+        mock_build_views,
+    ):
+        from .bl_optimizer import run_black_litterman
+
+        dates = pd.date_range("2025-01-01", periods=260, freq="B")
+        steps = np.arange(len(dates), dtype=float)
+        histories = {
+            "AAPL": 100 * np.cumprod(1 + 0.00055 + 0.00025 * np.sin(steps / 17)),
+            "MSFT": 95 * np.cumprod(1 + 0.00045 + 0.00020 * np.cos(steps / 19)),
+            "GOOG": 90 * np.cumprod(1 + 0.00110 + 0.00120 * np.sin(steps / 8)),
+            "TSLA": 80 * np.cumprod(1 + 0.00220 + 0.00500 * np.sin(steps / 4.5)),
+        }
+
+        def fake_history(symbol, period="2y"):
+            close = histories.get(symbol)
+            if close is None:
+                return pd.DataFrame()
+            return pd.DataFrame({"Close": close}, index=dates)
+
+        mock_get_price_history.side_effect = fake_history
+        mock_get_market_caps.return_value = {
+            "AAPL": 2.8e12,
+            "MSFT": 2.4e12,
+            "GOOG": 1.8e12,
+            "TSLA": 0.8e12,
+        }
+        mock_build_views.return_value = (
+            {"AAPL": 0.07, "MSFT": 0.05, "GOOG": 0.13, "TSLA": 0.24},
+            {"AAPL": 0.55, "MSFT": 0.45, "GOOG": 0.60, "TSLA": 0.70},
+            [{"symbol": s} for s in ["AAPL", "MSFT", "GOOG", "TSLA"]],
+        )
+
+        low = run_black_litterman(["AAPL", "MSFT", "GOOG", "TSLA"], 0.0)
+        mid = run_black_litterman(["AAPL", "MSFT", "GOOG", "TSLA"], 0.5)
+        high = run_black_litterman(["AAPL", "MSFT", "GOOG", "TSLA"], 1.0)
+
+        low_weights = pd.Series(low["allocation"])
+        mid_weights = pd.Series(mid["allocation"])
+        high_weights = pd.Series(high["allocation"])
+
+        self.assertIsNone(low["error"])
+        self.assertIsNone(mid["error"])
+        self.assertIsNone(high["error"])
+        self.assertAlmostEqual(float(low_weights.sum()), 1.0, places=3)
+        self.assertAlmostEqual(float(mid_weights.sum()), 1.0, places=3)
+        self.assertAlmostEqual(float(high_weights.sum()), 1.0, places=3)
+        self.assertGreater(high_weights["TSLA"], low_weights["TSLA"])
+        self.assertGreater(low_weights["AAPL"], high_weights["AAPL"])
+        self.assertGreaterEqual(float((low_weights - high_weights).abs().max()), 0.05)
+        self.assertGreaterEqual(float((low_weights - high_weights).abs().sum()), 0.20)
+
+
+class BLOptimizationViewTests(SimpleTestCase):
+    @patch("api.views._timed_call", return_value="")
+    @patch("api.bl_optimizer.run_black_litterman")
+    def test_bl_endpoint_passes_risk_tolerance(self, mock_run_black_litterman, _mock_timed_call):
+        from .views import BLOptimizationView
+
+        mock_run_black_litterman.return_value = {
+            "allocation": {"AAPL": 0.5, "MSFT": 0.5},
+            "view_details": [],
+            "bl_returns": {"AAPL": 8.0, "MSFT": 6.0},
+            "requested_tickers": ["AAPL", "MSFT"],
+            "valid_tickers": ["AAPL", "MSFT"],
+            "dropped_tickers": [],
+            "view_tickers": ["AAPL", "MSFT"],
+            "missing_view_tickers": [],
+            "source": "bl",
+            "blend_meta": {"from": "Min Vol", "to": "Max Sharpe", "alpha": 0.5},
+            "fallback_reason": None,
+            "error": None,
+        }
+
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/bl-optimize/",
+            {"tickers": ["AAPL", "MSFT"], "risk_tolerance": 0.75},
+            format="json",
+        )
+        response = BLOptimizationView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        mock_run_black_litterman.assert_called_once_with(["AAPL", "MSFT"], 0.75)
+
+
+class StreamlitPageConfigTests(SimpleTestCase):
+    def test_streamlit_page_filenames_are_unique_after_numeric_prefix(self):
+        page_dir = FRONTEND_ROOT / "pages"
+        inferred = {}
+
+        for page in page_dir.glob("*.py"):
+            inferred_name = re.sub(r"^\d+_", "", page.stem)
+            inferred.setdefault(inferred_name, []).append(page.name)
+
+        duplicates = {name: files for name, files in inferred.items() if len(files) > 1}
+        self.assertEqual(duplicates, {})
+
+
+class SearchedTickerResilienceTests(SimpleTestCase):
+    @patch("api.models.SearchedTicker.objects.get_or_create", side_effect=OperationalError("schema mismatch"))
+    def test_log_ignores_database_schema_errors(self, _mock_get_or_create):
+        SearchedTicker.log("AAPL")
+
+    @patch("api.models.SearchedTicker.objects.values_list", side_effect=ProgrammingError("schema mismatch"))
+    def test_get_watchlist_returns_empty_list_on_schema_errors(self, _mock_values_list):
+        self.assertEqual(SearchedTicker.get_watchlist(), [])
+
 
 class PredictionFallbackTests(SimpleTestCase):
     @patch("api.ai_services.get_price_history")
@@ -240,8 +391,17 @@ class BlackScholesEngineTests(SimpleTestCase):
         options_page = Path(__file__).resolve().parents[2] / "frontend" / "pages" / "3_Options_Analysis.py"
         source = options_page.read_text(encoding="utf-8")
         self.assertIn("render_black_scholes_analyzer()", source)
+        self.assertNotIn("jugaad", source.lower())
         self.assertNotIn("def bs_price(", source)
         self.assertNotIn("def bs_greeks(", source)
+
+    def test_standalone_black_scholes_sidebar_page_is_removed(self):
+        black_scholes_page = Path(__file__).resolve().parents[2] / "frontend" / "pages" / "6_Black_Scholes.py"
+        self.assertFalse(black_scholes_page.exists())
+
+    def test_backend_requirements_no_longer_include_jugaad(self):
+        requirements = (Path(__file__).resolve().parents[2] / "backend" / "requirements.txt").read_text(encoding="utf-8")
+        self.assertNotIn("jugaad", requirements.lower())
 
 
 class LauncherScriptTests(SimpleTestCase):

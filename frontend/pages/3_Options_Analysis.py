@@ -6,6 +6,8 @@ import yfinance as yf
 from scipy.optimize import minimize
 from datetime import datetime, timedelta
 import requests
+import time
+import uuid
 import os
 import sys
 
@@ -17,23 +19,29 @@ if _FRONTEND_ROOT not in sys.path:
 
 from components.black_scholes_ui import render_black_scholes_analyzer
 
+API_URL = "http://127.0.0.1:8000/api"
+
 # ---------------------------------------------------------------------------
-# NSE Live Data — jugaad-data (replaces nsepython scraper)
-# nsepython used to scrape NSE's website and gets blocked / breaks constantly.
-# jugaad-data uses NSE's official data endpoints and is actively maintained.
+# Option-chain sourcing
+# Use yfinance where options are available and fall back to a simulated
+# NIFTY-style chain for symbols that do not expose live option chains.
 # ---------------------------------------------------------------------------
-try:
-    from jugaad_data.nse import NSELive
-    _nse = NSELive()
-    JUGAAD_AVAILABLE = True
-except ImportError:
-    JUGAAD_AVAILABLE = False
+nifty_symbols = {"^NSEI", "NIFTY", "NIFTY 50", "NIFTY50"}
+banknifty_symbols = {"^NSEBANK", "BANKNIFTY", "BANK NIFTY"}
+
+
+def _uses_simulated_nse_chain(symbol):
+    upper_symbol = symbol.upper()
+    return (
+        upper_symbol in {s.upper() for s in nifty_symbols | banknifty_symbols}
+        or any(token in upper_symbol for token in ["NSE", ".NS", ".BO", "NIFTY"])
+    )
 
 # ---------------------------------------------------------------------------
 # Page Config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Options Analysis - QuantVis",
+    page_title="Options Analysis - Stock Price Predictor",
     layout="wide",
 )
 
@@ -48,63 +56,19 @@ def fetch_option_chain(symbol):
     """
     Fetch option chain data for a given symbol.
     Priority order:
-      1. jugaad-data  (NIFTY / BANKNIFTY — live NSE data)
-      2. yfinance     (US stocks and ETFs — live/delayed data)
-      3. Simulation   (fallback for NSE when live fetch fails)
+      1. yfinance   (US stocks and ETFs — live/delayed data)
+      2. Simulation (fallback for NSE / unavailable live chains)
     """
 
     # ------------------------------------------------------------------
-    # 1. jugaad-data for NIFTY / BANKNIFTY
-    # ------------------------------------------------------------------
-    nifty_symbols = ["^NSEI", "NIFTY", "NIFTY 50", "NIFTY50"]
-    banknifty_symbols = ["^NSEBANK", "BANKNIFTY", "BANK NIFTY"]
-
-    if JUGAAD_AVAILABLE and symbol.upper() in [s.upper() for s in nifty_symbols + banknifty_symbols]:
-        index_name = "BANKNIFTY" if symbol.upper() in [s.upper() for s in banknifty_symbols] else "NIFTY"
-        try:
-            payload   = _nse.live_option_chain(index_name)
-            records   = payload.get("records", {})
-            spot_price = records.get("underlyingValue", 24000.0)
-            expiry_list = records.get("expiryDates", [])
-
-            if not expiry_list:
-                raise ValueError("No expiry dates returned from NSE.")
-
-            nearest_expiry = expiry_list[0]
-            data_list = []
-
-            for item in records.get("data", []):
-                if item.get("expiryDate") == nearest_expiry and "CE" in item:
-                    ce = item["CE"]
-                    iv_raw = ce.get("impliedVolatility", 0)
-                    data_list.append({
-                        "strike":            ce["strikePrice"],
-                        "lastPrice":         ce["lastPrice"],
-                        # NSE returns IV as percentage (e.g. 15.5 means 15.5%)
-                        "impliedVolatility": iv_raw / 100.0 if iv_raw > 0 else 0.0,
-                        "contractSymbol":    ce.get("identifier", f"CE_{ce['strikePrice']}"),
-                    })
-
-            if data_list:
-                return pd.DataFrame(data_list), float(spot_price), nearest_expiry
-
-        except Exception as e:
-            st.warning(
-                f"jugaad-data live fetch failed for {index_name}: `{e}`. "
-                "Falling back to simulation mode."
-            )
-            # Fall through to simulation below
-
-    # ------------------------------------------------------------------
-    # 2. yfinance for US / global symbols
+    # 1. yfinance for symbols with listed options
     # ------------------------------------------------------------------
     ticker = yf.Ticker(symbol)
     try:
         expirations = ticker.options
 
         if not expirations:
-            # No options data — use simulation for Indian indices
-            if any(x in symbol.upper() for x in ["NSE", ".NS", "NIFTY", "NSEI"]):
+            if _uses_simulated_nse_chain(symbol):
                 return _simulate_nifty_chain(symbol)
             return None, None, None
 
@@ -117,8 +81,7 @@ def fetch_option_chain(symbol):
         return chain.calls, current_price, expiry
 
     except Exception:
-        # Last-resort simulation for NSE
-        if any(x in symbol.upper() for x in ["NSE", ".NS", "NIFTY", "NSEI"]):
+        if _uses_simulated_nse_chain(symbol):
             return _simulate_nifty_chain(symbol)
         return None, None, None
 
@@ -211,8 +174,9 @@ def calibrate_sabr(strikes, market_ivs, f, t):
 # Layout
 # ---------------------------------------------------------------------------
 
-tab_mispricing, tab_bs, tab_surface = st.tabs([
+tab_mispricing, tab_rl_blend, tab_bs, tab_surface = st.tabs([
     "Mispricing (SABR)",
+    "RL Ensemble Blend",
     "Black-Scholes",
     "Volatility Surface",
 ])
@@ -227,16 +191,12 @@ with tab_mispricing:
         symbol = st.text_input(
             "Index / Stock Symbol",
             "SPY",
-            help="US: SPY, AAPL, QQQ  |  India: NIFTY or NIFTY 50 (uses jugaad-data live NSE feed)",
+            help="US: SPY, AAPL, QQQ  |  India: NIFTY or NIFTY 50 (falls back to a simulated NSE chain when live options are unavailable)",
         )
-        if JUGAAD_AVAILABLE:
-            st.caption("jugaad-data installed — NIFTY live data available.")
-        else:
-            st.caption(
-                "jugaad-data not installed. "
-                "Run `pip install jugaad-data` for live NSE options. "
-                "NIFTY will use simulation mode."
-            )
+        st.caption(
+            "US options use yfinance live/delayed chains. "
+            "NIFTY-style symbols fall back to a simulated chain when live options are unavailable."
+        )
 
     if symbol:
         calls_df, spot_price, expiry_date = fetch_option_chain(symbol)
@@ -349,13 +309,213 @@ with tab_mispricing:
             )
 
 # ---------------------------------------------------------------------------
-# TAB 2 — Black-Scholes
+# TAB 2 — RL Ensemble Blend (A2C · SAC · TD3)
+# ---------------------------------------------------------------------------
+with tab_rl_blend:
+    st.markdown("### RL Ensemble Portfolio Blend")
+    st.caption("Train A2C · SAC · TD3 agents on your option underlyings and blend their allocations into a final weight.")
+
+    SPEED_MAP = {"Fast (5k)": 5000, "Medium (20k)": 20000, "Thorough (50k)": 50000}
+    COLORS    = ["#00D4FF", "#00FF94", "#FFB800", "#FF4466", "#BF7FFF", "#FF8C00"]
+
+    def _donut(alloc, centre):
+        fig = go.Figure(data=[go.Pie(
+            labels=list(alloc.keys()), values=list(alloc.values()), hole=0.55,
+            marker=dict(colors=COLORS[:len(alloc)], line=dict(color="#080C10", width=2)),
+            textfont=dict(size=11),
+        )])
+        fig.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            margin=dict(t=10, b=10, l=10, r=10),
+            annotations=[dict(text=centre, x=0.5, y=0.5, font_size=14, showarrow=False)],
+        )
+        return fig
+
+    LABELS = {
+        "fetching_data":          "Fetching 2 years of price data...",
+        "fetching_fundamentals":  "Scoring fundamentals & news sentiment...",
+        "hpo_running":            "Running GA hyperparameter optimisation...",
+        "hpo_complete":           "HPO complete — evolved hyperparameters ready.",
+        "hpo_loaded_from_cache":  "HPO loaded from cache.",
+        "hpo_skipped":            "HPO skipped — using defaults.",
+        "training_A2C":           "[1/3] Training A2C...",
+        "training_SAC":           "[2/3] Training SAC...",
+        "training_TD3":           "[3/3] Training TD3...",
+        "evaluating":             "Computing ensemble allocation...",
+        "complete":               "Done.",
+    }
+
+    # ── Inputs ────────────────────────────────────────────────────────────────
+    col_t, col_c = st.columns([3, 2])
+    with col_t:
+        rl_tickers_input = st.text_area("UNDERLYING TICKERS", "AAPL, MSFT, GOOG", height=70,
+                                        key="rl_opt_tickers")
+    with col_c:
+        rl_speed   = st.selectbox("RL TRAINING SPEED", list(SPEED_MAP.keys()), index=0, key="rl_opt_speed")
+        rl_ts      = SPEED_MAP[rl_speed]
+        hpo_eligible = rl_ts >= 10000
+        use_hpo    = st.toggle("Evolve Hyperparameters (GA HPO)", value=True,
+                               disabled=not hpo_eligible,
+                               help="Genetic Algorithm evolves optimal hyperparameters. Requires Medium or Thorough speed.",
+                               key="rl_opt_hpo")
+        if not hpo_eligible:
+            st.caption("HPO requires Medium or Thorough speed.")
+        elif use_hpo:
+            st.caption("GA will evolve hyperparameters for A2C · SAC · TD3.")
+        else:
+            st.caption("Default hyperparameters will be used.")
+
+    rl_blend = st.slider("QUANT ← BLEND → RL ENSEMBLE", 0.0, 1.0, 0.5, step=0.05, key="rl_opt_blend")
+    quant_pct = round((1 - rl_blend) * 100)
+    rl_pct    = round(rl_blend * 100)
+    st.caption(f"{quant_pct}% Quant (Min-Vol)  +  {rl_pct}% RL Ensemble (A2C · SAC · TD3)")
+
+    for k, v in [("rl_alloc_quant", None), ("rl_alloc_rl", None),
+                 ("rl_alloc_blend", None), ("rl_session", str(uuid.uuid4())[:8])]:
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    run_rl = st.button("Train and Blend", type="primary", key="rl_opt_run")
+
+    if run_rl:
+        tickers = [t.strip() for t in rl_tickers_input.split(",") if t.strip()]
+        if len(tickers) < 2:
+            st.warning("Enter at least 2 tickers.")
+        else:
+            st.session_state.rl_alloc_quant = None
+            st.session_state.rl_alloc_rl    = None
+            st.session_state.rl_alloc_blend = None
+            st.session_state.rl_session     = str(uuid.uuid4())[:8]
+
+            # Step 1 — Quant (min-vol via optimize endpoint)
+            with st.spinner("Step 1 — Running Quant optimisation..."):
+                try:
+                    resp = requests.post(f"{API_URL}/optimize/",
+                                         json={"tickers": tickers, "risk_tolerance": 0.3},
+                                         timeout=30)
+                    if resp.status_code == 200:
+                        q_raw = resp.json().get("allocation", {})
+                        st.session_state.rl_alloc_quant = q_raw
+                    else:
+                        st.warning("Quant step failed — RL-only blend will be used.")
+                except Exception as e:
+                    st.warning(f"Quant error: {e}")
+
+            # Step 2 — RL Ensemble (async train + poll)
+            if rl_blend > 0:
+                st.markdown("**Step 2 — Training RL Ensemble (A2C · SAC · TD3)**")
+                pb   = st.progress(0)
+                stxt = st.empty()
+                try:
+                    kick = requests.post(f"{API_URL}/rl/train/", json={
+                        "tickers":    tickers,
+                        "timesteps":  rl_ts,
+                        "session_id": st.session_state.rl_session,
+                        "use_hpo":    use_hpo,
+                    }, timeout=10)
+                    if kick.status_code == 200:
+                        for _ in range(600):
+                            try:
+                                prog = requests.get(
+                                    f"{API_URL}/rl/progress/{st.session_state.rl_session}/",
+                                    timeout=5).json()
+                                pct    = prog.get("progress", 0)
+                                status = prog.get("status", "")
+                                pb.progress(int(min(pct, 100)))
+                                stxt.caption(f"▸ {LABELS.get(status, status)}  {pct:.0f}%")
+                                if status == "error":
+                                    st.error(prog.get("error", "Unknown error"))
+                                    break
+                                if status == "complete":
+                                    st.session_state.rl_alloc_rl = prog.get("allocation", {})
+                                    break
+                            except Exception:
+                                pass
+                            time.sleep(2)
+                    else:
+                        st.warning("RL training failed to start.")
+                except Exception as e:
+                    st.warning(f"RL error: {e}")
+
+            # Blend quant + RL
+            q = st.session_state.rl_alloc_quant or {}
+            r = st.session_state.rl_alloc_rl    or {}
+            if q or r:
+                if q and r:
+                    all_t  = set(q) | set(r)
+                    blended = {t: (1 - rl_blend) * q.get(t, 0.0) + rl_blend * r.get(t, 0.0) for t in all_t}
+                    total  = sum(blended.values())
+                    blended = {t: round(v / total, 4) for t, v in blended.items() if v > 0.001}
+                else:
+                    blended = q or r
+                st.session_state.rl_alloc_blend = blended
+            st.rerun()
+
+    # ── Results ───────────────────────────────────────────────────────────────
+    if st.session_state.rl_alloc_blend:
+        q     = st.session_state.rl_alloc_quant or {}
+        r     = st.session_state.rl_alloc_rl    or {}
+        blend = st.session_state.rl_alloc_blend
+
+        st.success("▸ BLENDED ALLOCATION READY")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.caption(f"Quant (Min-Vol) — {quant_pct}%")
+            if q: st.plotly_chart(_donut(q, "Quant"), use_container_width=True)
+        with c2:
+            st.caption(f"RL Ensemble — {rl_pct}%")
+            if r:
+                st.plotly_chart(_donut(r, "ENS"), use_container_width=True)
+            else:
+                st.info("Blend set to 0% — RL not trained")
+        with c3:
+            st.caption(f"Final Blend — {quant_pct}% + {rl_pct}%")
+            st.plotly_chart(_donut(blend, "MIX"), use_container_width=True)
+
+        # Comparison table
+        all_t = sorted(set(list(q.keys()) + list(r.keys()) + list(blend.keys())))
+        rows  = []
+        for t in all_t:
+            qw = q.get(t, 0.0); rw = r.get(t, 0.0); bw = blend.get(t, 0.0)
+            rows.append({
+                "Ticker":       t,
+                "Quant (Min-Vol)": f"{qw:.1%}" if qw > 0 else "—",
+                "RL Ensemble":  f"{rw:.1%}" if rw > 0 else "—",
+                "Final Blend":  f"{bw:.1%}" if bw > 0 else "—",
+                "Δ RL vs Quant": (f"+{bw-qw:.1%}" if bw-qw >= 0 else f"{bw-qw:.1%}") if qw > 0 else "new",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # Agent metrics
+        prog_data = {}
+        try:
+            prog_data = requests.get(
+                f"{API_URL}/rl/progress/{st.session_state.rl_session}/", timeout=3).json()
+        except Exception:
+            pass
+        if prog_data.get("agent_metrics"):
+            st.markdown("**Agent Performance**")
+            m_rows = []
+            for agent, m in prog_data["agent_metrics"].items():
+                m_rows.append({
+                    "Agent":        agent,
+                    "Final Value":  f"${m['final_value']:,.0f}",
+                    "Return":       f"{m['total_return']:+.1f}%",
+                    "Sharpe":       f"{m['sharpe']:.3f}",
+                    "Sortino":      f"{m['sortino']:.3f}",
+                    "Max Drawdown": f"{m['max_drawdown']:.2%}",
+                })
+            st.dataframe(pd.DataFrame(m_rows), use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# TAB 3 — Black-Scholes
 # ---------------------------------------------------------------------------
 with tab_bs:
     render_black_scholes_analyzer()
 
 # ---------------------------------------------------------------------------
-# TAB 3 — Volatility Surface
+# TAB 4 — Volatility Surface
 # ---------------------------------------------------------------------------
 with tab_surface:
     st.subheader("3D Implied Volatility Surface")
