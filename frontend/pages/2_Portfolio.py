@@ -771,7 +771,11 @@ def _build_deep_report_context(
     full_end_str = test_end_str
 
     _emit_progress(0.28, "Preparing report inputs", "Loading report settings and risk-free rate.", 55)
-    risk_free_rate = qr.opt_core.get_risk_free_rate()
+    _indian_count = sum(1 for t in requested_tickers if t.upper().endswith((".NS", ".BO")))
+    if _indian_count > len(requested_tickers) / 2:
+        risk_free_rate = 0.065  # RBI repo rate for Indian market
+    else:
+        risk_free_rate = 0.0359
     all_tickers = list(dict.fromkeys(requested_tickers + [benchmark_ticker]))
 
     _emit_progress(0.38, "Fetching full-period data", f"Downloading price history through {full_end_str}.", 45)
@@ -805,6 +809,37 @@ def _build_deep_report_context(
     pr_metrics, pr_plot_data = calculate_metrics(
         portfolio_eval, "My Portfolio", benchmark_ticker, risk_free_rate
     )
+
+    per_asset_swot = {}
+    data_1y = data_full.iloc[-252:] if len(data_full) > 252 else data_full
+    for ticker in tickers:
+        try:
+            ret_1y = (data_1y[ticker].iloc[-1] / data_1y[ticker].iloc[0]) - 1
+            t_eval = pd.DataFrame({benchmark_ticker: portfolio_eval[benchmark_ticker], ticker: data_full[ticker] / data_full[ticker].iloc[0]})
+            t_met, _ = calculate_metrics(t_eval, ticker, benchmark_ticker, risk_free_rate)
+            t_ret = data_full[ticker].pct_change().dropna()
+            p_ret = portfolio_eval["My Portfolio"].pct_change().dropna()
+            b_ret = data_full[benchmark_ticker].pct_change().dropna()
+            corr_port = pd.concat([t_ret, p_ret], axis=1).dropna().corr().iloc[0, 1]
+            corr_bench = pd.concat([t_ret, b_ret], axis=1).dropna().corr().iloc[0, 1]
+            def _to_float(val, default=0.0):
+                try:
+                    return float(str(val).replace("%", "").replace(",", "").strip()) / 100 if "%" in str(val) else float(val)
+                except (ValueError, TypeError):
+                    return default
+
+            per_asset_swot[ticker] = {
+                "cagr_1y": float(ret_1y),
+                "beta": _to_float(t_met.get("Beta (vs Benchmark)", 1.0)),
+                "volatility": _to_float(t_met.get("Annualized Volatility (Asset)", 0.2)),
+                "max_drawdown": _to_float(t_met.get("Max Drawdown", 0)),
+                "corr_port": float(corr_port),
+                "corr_bench": float(corr_bench),
+                "weight": float(portfolio_dict.get(ticker, 0)),
+                "sector": filtered_sector_map.get(ticker, "Other"),
+            }
+        except Exception:
+            pass
 
     # ── Bug 4: Build rolling returns as clean DataFrame ────────────────
     try:
@@ -1027,6 +1062,7 @@ def _build_deep_report_context(
                     "sector_map": filtered_sector_map,
                     "benchmark_excluded": benchmark_excluded,
                     "asset_corr_html": validation.get("asset_corr_html", ""),
+                    "per_asset_swot": per_asset_swot,
                 }},
             ],
         },
@@ -1093,6 +1129,10 @@ def _render_swot_section(swot_data):
         sector_map = swot_data.get("sector_map", {})
         benchmark_excluded = swot_data.get("benchmark_excluded", False)
         asset_corr_html = swot_data.get("asset_corr_html", "")
+
+        _is_indian = any(t.upper().endswith((".NS", ".BO")) for t in tickers)
+        _market_listing = "NSE-listed equities" if _is_indian else "US-listed equities"
+        _market_name = "Indian markets" if _is_indian else "US markets"
 
         # ── Safe numeric parsers ───────────────────────────────────────
         def _pct(key):
@@ -1176,8 +1216,15 @@ def _render_swot_section(swot_data):
             S.append(f"Top holdings: {', '.join(f'{t} ({w:.1%})' for t,w in top3)}.")
         if len(S) < 3 and benchmark_excluded:
             S.append(f"Benchmark ({benchmark}) correctly excluded from the investable universe.")
-        while len(S) < 3:
-            S.append(f"Portfolio consists of {len(tickers)} liquid, US-listed equities with deep historical data.")
+        _s_fallbacks = [
+            f"Portfolio consists of {len(tickers)} liquid, {_market_listing} with deep historical data.",
+            f"All holdings are exchange-traded with transparent daily pricing in {_market_name}.",
+            f"Portfolio benefits from broad institutional coverage across {len(tickers)} names.",
+        ]
+        for _fb in _s_fallbacks:
+            if len(S) >= 3:
+                break
+            S.append(_fb)
 
         # ════════════════════════════════════════════════════════════════
         # WEAKNESSES (amber)
@@ -1201,8 +1248,15 @@ def _render_swot_section(swot_data):
             W.append(f"Daily Value-at-Risk (95%) is {var_95:.2%} — a 1-in-20 day loss could reach this level.")
         if len(W) < 3 and len(tickers) < 5:
             W.append(f"Narrow universe of only {len(tickers)} assets limits diversification benefits.")
-        while len(W) < 3:
-            W.append("No fixed-income or alternative assets in the portfolio to buffer equity drawdowns.")
+        _w_fallbacks = [
+            "No fixed-income or alternative assets in the portfolio to buffer equity drawdowns.",
+            "Portfolio lacks commodity or gold exposure as an inflation hedge.",
+            "No explicit currency hedging for international holdings.",
+        ]
+        for _fb in _w_fallbacks:
+            if len(W) >= 3:
+                break
+            W.append(_fb)
 
         # ════════════════════════════════════════════════════════════════
         # OPPORTUNITIES (blue)
@@ -1221,8 +1275,15 @@ def _render_swot_section(swot_data):
         if sharpe is not None and sharpe > 0 and beta is not None and beta > 1:
             O.append(f"A lower-beta variant could achieve similar risk-adjusted returns with reduced drawdown exposure.")
         # Guarantee ≥ 3
-        while len(O) < 3:
-            O.append("Options overlays (e.g., covered calls) could enhance yield and reduce effective portfolio volatility.")
+        _o_fallbacks = [
+            "Options overlays (e.g., covered calls) could enhance yield and reduce effective portfolio volatility.",
+            "Factor tilts (value, momentum, quality) could improve risk-adjusted returns.",
+            "Systematic rebalancing triggers based on drift thresholds would enforce discipline.",
+        ]
+        for _fb in _o_fallbacks:
+            if len(O) >= 3:
+                break
+            O.append(_fb)
 
         # ════════════════════════════════════════════════════════════════
         # THREATS (red)
@@ -1240,8 +1301,15 @@ def _render_swot_section(swot_data):
             T.append(f"High benchmark correlation ({', '.join(f'{t} ρ={v:.2f}' for t,v in list(high_corr.items())[:3])}) offers limited diversification in a crash.")
         T.append("Historical optimization may not predict future regimes — structural market shifts could invalidate assumptions.")
         # Guarantee ≥ 3
-        while len(T) < 3:
-            T.append("Rising interest rates could compress equity valuations, especially for growth-oriented holdings.")
+        _t_fallbacks = [
+            "Rising interest rates could compress equity valuations, especially for growth-oriented holdings.",
+            "Geopolitical shocks or trade policy changes could disrupt sector performance.",
+            "Liquidity contraction in risk-off environments may widen bid-ask spreads on smaller positions.",
+        ]
+        for _fb in _t_fallbacks:
+            if len(T) >= 3:
+                break
+            T.append(_fb)
 
         # ════════════════════════════════════════════════════════════════
         # Render the four styled cards in a 2×2 grid
@@ -1278,6 +1346,70 @@ def _render_swot_section(swot_data):
                     f'{bullet_html}</div>'
                 )
                 st.markdown(card_html, unsafe_allow_html=True)
+
+        per_asset_swot = swot_data.get("per_asset_swot", {})
+        if per_asset_swot:
+            st.markdown("<br>#### Individual Asset Analysis", unsafe_allow_html=True)
+            asset_cards_html = "<div style='display:flex; flex-wrap:wrap; gap:16px;'>"
+            for ticker, data in per_asset_swot.items():
+                s_b, w_b, o_b, t_b = [], [], [], []
+                ret = data.get('cagr_1y')
+                if ret is not None: s_b.append(f"1Y Return: {ret:.2%}")
+                beta_a = data.get('beta')
+                if beta_a is not None: s_b.append(f"Beta vs Bench: {beta_a:.2f}")
+                corr_p = data.get('corr_port')
+                if corr_p is not None: s_b.append(f"Port Corr: {corr_p:.2f}")
+                
+                vol = data.get('volatility')
+                if vol is not None: w_b.append(f"Volatility: {vol:.2%}")
+                mdd = data.get('max_drawdown')
+                if mdd is not None: w_b.append(f"Max DD: {mdd:.2%}")
+                corr_b = data.get('corr_bench')
+                if corr_b is not None and corr_b > 0.9: w_b.append(f"High Bench Corr: {corr_b:.2f}")
+                
+                sec = data.get('sector')
+                if sec and sec != "Other": o_b.append(f"Sector: {sec}")
+                if ret is not None and ret > 0.2: o_b.append("Strong Momentum (>20%)")
+                
+                wt = data.get('weight', 0)
+                if wt > 0.3: t_b.append(f"Concentration Risk ({wt:.1%})")
+                if beta_a is not None and beta_a > 1.3: t_b.append(f"High Beta Risk: {beta_a:.2f}")
+
+                if not s_b: s_b.append("Core Holding")
+                if not w_b: w_b.append("Standard Risk Profile")
+                if not o_b: o_b.append("Long-term Growth")
+                if not t_b: t_b.append("Market Correlation")
+
+                def _render_mini_list(color, items):
+                    return "".join(f"<div style='font-size:0.75rem; margin-bottom:4px; border-left: 2px solid {color}; padding-left: 6px; color:#e2e8f0;'>{item}</div>" for item in items[:2])
+
+                card = f"""
+                <div style="flex: 1 1 200px; border-radius:12px; padding:16px; background:#111827; border:1px solid #1f2937; box-shadow:0 4px 15px rgba(0,0,0,0.2);">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                        <span style="font-weight:bold; font-size:1rem; color:#f8fafc;">{ticker}</span>
+                        <span style="font-size:0.75rem; padding:2px 8px; border-radius:12px; background:#374151; color:#9ca3af;">{wt:.1%} Wt</span>
+                    </div>
+                    <div style="margin-bottom:8px;">
+                        <div style="font-size:0.75rem; font-weight:bold; color:#4ade80; margin-bottom:4px;">Strengths</div>
+                        {_render_mini_list('#4ade80', s_b)}
+                    </div>
+                    <div style="margin-bottom:8px;">
+                        <div style="font-size:0.75rem; font-weight:bold; color:#fbbf24; margin-bottom:4px;">Weaknesses</div>
+                        {_render_mini_list('#fbbf24', w_b)}
+                    </div>
+                    <div style="margin-bottom:8px;">
+                        <div style="font-size:0.75rem; font-weight:bold; color:#60a5fa; margin-bottom:4px;">Opportunities</div>
+                        {_render_mini_list('#60a5fa', o_b)}
+                    </div>
+                    <div>
+                        <div style="font-size:0.75rem; font-weight:bold; color:#f87171; margin-bottom:4px;">Threats</div>
+                        {_render_mini_list('#f87171', t_b)}
+                    </div>
+                </div>"""
+                asset_cards_html += card
+            
+            asset_cards_html += "</div>"
+            st.markdown(asset_cards_html, unsafe_allow_html=True)
 
     except Exception as swot_err:
         st.error(f"SWOT analysis rendering failed: {swot_err}")
@@ -2238,6 +2370,11 @@ with tab_report:
             "Generate a comprehensive report with backtesting, efficient frontier, "
             "walk-forward validation, and Monte Carlo analysis."
         )
+
+        REPORT_VERSION = "v3"
+        if st.session_state.get("deep_report_version") != REPORT_VERSION:
+            st.session_state.pop("deep_report_context", None)
+            st.session_state["deep_report_version"] = REPORT_VERSION
         
         with st.expander("Report Configuration", expanded=True):
             col_in1, col_in2 = st.columns(2)
