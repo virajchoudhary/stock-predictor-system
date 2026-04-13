@@ -1,0 +1,53 @@
+# Stock Price Predictor Backend Dependencies
+# Updated: replaced tensorflow, nsepython, sentence-transformers
+# with modern maintained alternatives
+
+django
+djangorestframework
+gunicorn
+
+# Market Data
+yfinance>=0.2.40
+polygon-api-client
+
+# Data & Math
+pandas
+numpy
+scipy
+scikit-learn
+cvxpy
+
+# Deep Learning (replaced tensorflow)
+torch>=1.11
+torchvision
+
+# Portfolio Optimisation (Riskfolio-Lib — HRP, CVaR, Mean-Variance)
+Riskfolio-Lib
+PyPortfolioOpt==1.5.5
+
+# AI / LLM
+groq
+
+# Embeddings (replaced sentence-transformers — 10x faster, no 400MB download)
+fastembed
+
+# Reporting
+quant-reporter
+
+# Frontend
+streamlit
+plotly
+
+# Technical Analysis (130+ indicators)
+ta
+
+# Utilities
+statsmodels
+python-dotenv
+celery==5.3.6
+redis==5.0.1
+django-celery-beat==2.6.0
+
+django-cors-headers==4.9.0
+stable-baselines3
+gymnasium

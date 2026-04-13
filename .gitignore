@@ -1,0 +1,22 @@
+*.DS_Store
+*.env
+*.pyc
+*.pyo
+._*
+__pycache__/
+backend/venv/
+celerybeat-schedule
+celerybeat-schedule-shm
+celerybeat-schedule-wal
+portfolio_report.html
+backend/db.sqlite3
+frontend/venv/
+logs/
+*.log
+
+# RL runtime artifacts
+backend/api/rl_models/
+backend/api/rl_progress/
+backend/api/rl_hpo_cache/
+ppo_portfolio_model.zip
+.cache/
