@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*keyword arguments.*deprecated.*")
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -322,7 +325,7 @@ with tab_rl_blend:
         fig = go.Figure(data=[go.Pie(
             labels=list(alloc.keys()), values=list(alloc.values()), hole=0.55,
             marker=dict(colors=COLORS[:len(alloc)], line=dict(color="#131722", width=2)),
-            textfont=dict(size=11),
+            insidetextfont=dict(size=10, color="#D1D4DC"),
         )])
         fig.update_layout(
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",

@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*keyword arguments.*deprecated.*")
 import streamlit as st
 import requests
 import pandas as pd

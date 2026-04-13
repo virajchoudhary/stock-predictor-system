@@ -1,3 +1,6 @@
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*keyword arguments.*deprecated.*")
 """
 SWOT Analysis - Stock Price Predictor
 =====================================

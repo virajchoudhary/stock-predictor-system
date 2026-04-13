@@ -1,4 +1,12 @@
 import streamlit as st
+import warnings
+
+# Suppress Plotly 6.x DeprecationWarnings — Streamlit 1.50 captures these
+# and renders them as visible UI boxes if not suppressed at module level.
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="plotly")
+warnings.filterwarnings("ignore", message=".*keyword arguments.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*config.*Plotly.*")
+warnings.filterwarnings("ignore", message=".*deprecated.*future release.*")
 
 _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Roboto+Mono:wght@300;400;500&display=swap');
