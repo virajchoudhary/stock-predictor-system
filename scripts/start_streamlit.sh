@@ -5,7 +5,9 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FRONTEND_DIR="$REPO_DIR/frontend"
 BACKEND_DIR="$REPO_DIR/backend"
 
-if [[ -x "$BACKEND_DIR/venv/bin/python" ]]; then
+if [[ -x "$BACKEND_DIR/venv_new/bin/python" ]]; then
+  PYTHON_BIN="$BACKEND_DIR/venv_new/bin/python"
+elif [[ -x "$BACKEND_DIR/venv/bin/python" ]]; then
   PYTHON_BIN="$BACKEND_DIR/venv/bin/python"
 elif [[ -x "$BACKEND_DIR/.venv/bin/python" ]]; then
   PYTHON_BIN="$BACKEND_DIR/.venv/bin/python"

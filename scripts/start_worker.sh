@@ -4,7 +4,9 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_DIR="$REPO_DIR/backend"
 
-if [[ -x "$BACKEND_DIR/venv/bin/celery" ]]; then
+if [[ -x "$BACKEND_DIR/venv_new/bin/celery" ]]; then
+  CELERY_BIN="$BACKEND_DIR/venv_new/bin/celery"
+elif [[ -x "$BACKEND_DIR/venv/bin/celery" ]]; then
   CELERY_BIN="$BACKEND_DIR/venv/bin/celery"
 elif [[ -x "$BACKEND_DIR/.venv/bin/celery" ]]; then
   CELERY_BIN="$BACKEND_DIR/.venv/bin/celery"
