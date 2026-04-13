@@ -726,7 +726,7 @@ def _build_deep_report_context(
     risk_tolerance,
     progress_callback=None,
 ):
-    from quant_reporter.data import get_data
+    from quant_reporter.data import get_data, get_benchmark_data
     from quant_reporter.metrics import calculate_metrics
     from quant_reporter.html_builder import generate_html_report
     from quant_reporter.plotting import plot_cumulative_returns, plot_regression
@@ -738,6 +738,7 @@ def _build_deep_report_context(
             progress_callback(progress_value, stage_label, detail, eta_seconds)
 
     requested_tickers = [str(t).upper() for t in input_tickers]
+    benchmark_ticker = benchmark_ticker.strip().upper()
     allocation_weights = allocation_result.get("allocation", allocation_result)
     allocation_source = allocation_result.get("source", "risk_based")
     allocation_blend_meta = allocation_result.get("blend_meta", {})
@@ -776,16 +777,53 @@ def _build_deep_report_context(
         risk_free_rate = 0.065  # RBI repo rate for Indian market
     else:
         risk_free_rate = 0.0359
-    all_tickers = list(dict.fromkeys(requested_tickers + [benchmark_ticker]))
+    # Portfolio tickers only — benchmark injected separately below
+    portfolio_only_tickers = list(dict.fromkeys(requested_tickers))
 
-    _emit_progress(0.38, "Fetching full-period data", f"Downloading price history through {full_end_str}.", 45)
-    data_full = get_data(all_tickers, train_start_str, full_end_str)
-    _emit_progress(0.48, "Fetching training data", f"Loading in-sample data through {train_end_str}.", 34)
-    data_train = get_data(all_tickers, train_start_str, train_end_str)
-    _emit_progress(0.58, "Fetching validation data", f"Loading out-of-sample data through {test_end_str}.", 26)
-    data_test = get_data(all_tickers, test_start_str, test_end_str)
+    _emit_progress(0.35, "Fetching full-period portfolio data",
+                   f"Downloading portfolio price history through {full_end_str}.", 48)
+    data_full = get_data(portfolio_only_tickers, train_start_str, full_end_str)
+
+    _emit_progress(0.43, "Fetching fresh benchmark data (full period)",
+                   f"Downloading live {benchmark_ticker} data through {full_end_str}.", 42)
+    bm_full = get_benchmark_data(benchmark_ticker, train_start_str, full_end_str,
+                                  reference_index=data_full.index if data_full is not None else None)
+    if data_full is not None and benchmark_ticker not in data_full.columns:
+        data_full[benchmark_ticker] = bm_full.reindex(data_full.index).ffill().bfill()
+
+    _emit_progress(0.50, "Fetching training data",
+                   f"Loading in-sample portfolio data through {train_end_str}.", 34)
+    data_train = get_data(portfolio_only_tickers, train_start_str, train_end_str)
+
+    _emit_progress(0.55, "Fetching fresh benchmark data (training period)",
+                   f"Downloading live {benchmark_ticker} training data.", 30)
+    bm_train = get_benchmark_data(benchmark_ticker, train_start_str, train_end_str,
+                                   reference_index=data_train.index if data_train is not None else None)
+    if data_train is not None and benchmark_ticker not in data_train.columns:
+        data_train[benchmark_ticker] = bm_train.reindex(data_train.index).ffill().bfill()
+
+    _emit_progress(0.60, "Fetching validation data",
+                   f"Loading out-of-sample portfolio data through {test_end_str}.", 26)
+    data_test = get_data(portfolio_only_tickers, test_start_str, test_end_str)
+
+    _emit_progress(0.63, "Fetching fresh benchmark data (test period)",
+                   f"Downloading live {benchmark_ticker} out-of-sample data.", 24)
+    bm_test = get_benchmark_data(benchmark_ticker, test_start_str, test_end_str,
+                                  reference_index=data_test.index if data_test is not None else None)
+    if data_test is not None and benchmark_ticker not in data_test.columns:
+        data_test[benchmark_ticker] = bm_test.reindex(data_test.index).ffill().bfill()
+
     if data_full is None or data_train is None or data_test is None:
         raise ValueError("Failed to fetch report data for one or more periods.")
+
+    # Verify benchmark column is present in all windows after injection
+    for _label, _df in [("full", data_full), ("train", data_train), ("test", data_test)]:
+        if benchmark_ticker not in _df.columns:
+            raise ValueError(
+                f"Benchmark '{benchmark_ticker}' could not be aligned with the "
+                f"{_label} period portfolio data. The ticker may not have data "
+                f"for the selected date range."
+            )
 
     report_universe = resolve_report_universe(
         requested_tickers,
@@ -1431,9 +1469,11 @@ def _render_deep_report_sections(report_context):
         """,
         unsafe_allow_html=True,
     )
-    # Bug 3: Show benchmark exclusion warning at the top if applicable
+    # Show benchmark exclusion warning at the top if applicable
     if report_context.get("benchmark_excluded"):
-        st.warning("⚠️ SPY excluded from portfolio optimization — it is used as benchmark.")
+        _excl_bm = report_context.get("benchmark_ticker") or "benchmark"
+        st.warning(f"⚠️ {_excl_bm} excluded from portfolio optimization — it is used as benchmark.")
+
 
     section_tabs = st.tabs([section["title"] for section in report_context["sections"]])
     for tab, section in zip(section_tabs, report_context["sections"]):
@@ -2371,11 +2411,12 @@ with tab_report:
             "walk-forward validation, and Monte Carlo analysis."
         )
 
-        REPORT_VERSION = "v3"
+        REPORT_VERSION = "v4"
         if st.session_state.get("deep_report_version") != REPORT_VERSION:
             st.session_state.pop("deep_report_context", None)
+            st.session_state.pop("deep_report_cache_key", None)
             st.session_state["deep_report_version"] = REPORT_VERSION
-        
+
         with st.expander("Report Configuration", expanded=True):
             col_in1, col_in2 = st.columns(2)
             with col_in1:
@@ -2390,6 +2431,40 @@ with tab_report:
                     0.0, 1.0, 0.5, 0.05,
                     key="deep_report_risk",
                 )
+
+        # ── Live benchmark change-detection ──────────────────────────────────
+        # Build a cache-key from all Deep Report inputs.  If any input changes,
+        # the old report_context is immediately invalidated so the user always
+        # sees data that corresponds to the current benchmark ticker and settings.
+        _current_cache_key = (
+            "||".join(sorted([t.strip().upper() for t in repo_tickers.split(",") if t.strip()])),
+            benchmark.strip().upper(),
+            str(start_date),
+            str(end_date),
+            str(round(report_risk_tolerance, 2)),
+        )
+        _stored_cache_key = st.session_state.get("deep_report_cache_key")
+        _inputs_changed = (_stored_cache_key is not None) and (_current_cache_key != _stored_cache_key)
+
+        if _inputs_changed:
+            # Clear the stale context so it is NOT rendered below
+            st.session_state.pop("deep_report_context", None)
+            _changed_fields = []
+            if _stored_cache_key[1] != _current_cache_key[1]:
+                _changed_fields.append(f"Benchmark: **{_stored_cache_key[1]}** → **{_current_cache_key[1]}**")
+            if _stored_cache_key[0] != _current_cache_key[0]:
+                _changed_fields.append("Portfolio tickers changed")
+            if _stored_cache_key[2] != _current_cache_key[2] or _stored_cache_key[3] != _current_cache_key[3]:
+                _changed_fields.append("Date range changed")
+            if _stored_cache_key[4] != _current_cache_key[4]:
+                _changed_fields.append("Risk tolerance changed")
+            _change_summary = "; ".join(_changed_fields) if _changed_fields else "Settings changed"
+            st.info(
+                f"⚡ **Report inputs changed** ({_change_summary}). "
+                "Click **Generate Deep Report** to fetch fresh live data and update all results.",
+                icon="🔄",
+            )
+        # ────────────────────────────────────────────────────────────────────
 
         generate_report = st.button("Generate Deep Report", type="primary")
 
@@ -2488,7 +2563,11 @@ with tab_report:
                                     eta_seconds=eta_seconds,
                                 ),
                             )
+                            # Record successful benchmark ticker in the context
+                            report_context["benchmark_ticker"] = validated_benchmark
                             st.session_state["deep_report_context"] = report_context
+                            # Commit the cache-key so change-detection works on next render
+                            st.session_state["deep_report_cache_key"] = _current_cache_key
                             st.success(
                                 f"Report generated successfully in {_format_duration(time.time() - report_started_at)}."
                             )
