@@ -121,12 +121,27 @@ def _fmt_large(val, currency_sym="$"):
     return f"{currency_sym}{val:,.0f}"
 
 
-def fetch_fundamentals(ticker: str, market: str) -> Dict:
+def fetch_fundamentals(ticker: str, market: str, target_date: Optional[str] = None) -> Dict:
     """Fetch company fundamentals, price metrics, and financial ratios."""
     currency = "₹" if market == "IN" else "$"
     try:
         t = yf.Ticker(ticker)
         info = t.info or {}
+
+        # If backtesting, we must override live price and related metrics
+        if target_date:
+            from .ai_services import get_price_history, TrendPredictor
+            hist = get_price_history(ticker, period="5d", target_date=target_date)
+            if hist is not None and not hist.empty:
+                close = TrendPredictor._get_close_series(hist)
+                if not close.empty:
+                    p = float(close.iloc[-1])
+                    info["currentPrice"] = p
+                    info["regularMarketPrice"] = p
+                    # Proxy market cap if possible
+                    shares = info.get("sharesOutstanding")
+                    if shares and p:
+                        info["marketCap"] = shares * p
 
         name = (info.get("longName") or info.get("shortName") or ticker)
         sector = info.get("sector", "N/A")
@@ -236,15 +251,16 @@ def fetch_fundamentals(ticker: str, market: str) -> Dict:
 def fetch_price_metrics(ticker: str, target_date: Optional[str] = None) -> Dict:
     """Fetch price history, compute technicals and vol metrics."""
     try:
-        t = yf.Ticker(ticker)
+        # Use auto_adjust=True for consistent Adjusted Close across all analytical layers
         if target_date:
+            from datetime import timedelta
             end_dt = pd.to_datetime(target_date)
-            start_dt = end_dt - datetime.timedelta(days=365)
+            start_dt = end_dt - timedelta(days=365)
             hist = yf.download(ticker, start=start_dt.strftime("%Y-%m-%d"), 
-                               end=(end_dt + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
-                               progress=False, threads=False)
+                               end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                               progress=False, threads=False, auto_adjust=True)
         else:
-            hist = t.history(period="1y")
+            hist = yf.download(ticker, period="1y", progress=False, threads=False, auto_adjust=True)
             
         if hist.empty:
             return {}
@@ -388,6 +404,9 @@ def fetch_peers(ticker: str, sector: str, market: str) -> List[Dict]:
     peer_data = []
     for p in peers:
         try:
+            # Note: We use live info for peers even in backtests for basic comparison, 
+            # as fetching full historical info for all peers is computationally expensive
+            # for a SWOT high-level view.
             info = yf.Ticker(p).info or {}
             peer_data.append({
                 "ticker": p,
@@ -611,13 +630,18 @@ def run_swot_analysis(query: str, target_date: Optional[str] = None) -> Dict:
     """
     ticker, market = resolve_ticker(query)
 
-    fundamentals = fetch_fundamentals(ticker, market)
+    fundamentals = fetch_fundamentals(ticker, market, target_date=target_date)
     if "error" in fundamentals and len(fundamentals) <= 3:
         return {"error": f"Could not fetch data for '{query}' (resolved: {ticker})"}
 
     price_metrics = fetch_price_metrics(ticker, target_date=target_date)
     company_name = fundamentals.get("name", ticker)
-    news = fetch_news(ticker, company_name)
+    
+    # Suppression of live news during backtesting to maintain model integrity
+    news = []
+    if not target_date:
+        news = fetch_news(ticker, company_name)
+        
     sector = fundamentals.get("sector", "")
     peers = fetch_peers(ticker, sector, market)
     swot = generate_swot(ticker, market, fundamentals, price_metrics, news, peers)

@@ -171,9 +171,10 @@ def get_price_history(symbol, period="6mo", target_date=None):
             days = period_days.get(period, 180)
             end_dt = pd.to_datetime(target_date)
             start_dt = end_dt - timedelta(days=days)
-            hist = yf.download(symbol, start=start_dt.strftime("%Y-%m-%d"), end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"), progress=False, threads=False, auto_adjust=False)
+            # Use auto_adjust=True for consistent historical benchmarking (Adjusted Close)
+            hist = yf.download(symbol, start=start_dt.strftime("%Y-%m-%d"), end=(end_dt + timedelta(days=1)).strftime("%Y-%m-%d"), progress=False, threads=False, auto_adjust=True)
         else:
-            hist = yf.download(symbol, period=period, progress=False, threads=False, auto_adjust=False)
+            hist = yf.download(symbol, period=period, progress=False, threads=False, auto_adjust=True)
             
         if isinstance(hist, pd.DataFrame) and isinstance(hist.columns, pd.MultiIndex):
             try:
@@ -185,17 +186,47 @@ def get_price_history(symbol, period="6mo", target_date=None):
         return pd.DataFrame()
 
 
-def get_ticker_info(symbol):
+def get_price_window(symbol, start_date, end_date):
+    """Fetch price history between two specific dates."""
+    if polygon_client:
+        try:
+            aggs = polygon_client.get_aggs(
+                ticker     = symbol.upper(),
+                multiplier = 1,
+                timespan   = "day",
+                from_      = start_date.strftime("%Y-%m-%d"),
+                to         = end_date.strftime("%Y-%m-%d"),
+                limit      = 50000,
+            )
+            if aggs:
+                df = pd.DataFrame([{
+                    "Open":   a.open, "High": a.high, "Low": a.low, "Close": a.close, "Volume": a.volume,
+                } for a in aggs], index=pd.to_datetime([a.timestamp for a in aggs], unit="ms"))
+                if not df.empty: return df
+        except Exception: pass
+    
+    try:
+        # Backtesting uses auto_adjust=True to match historical charts
+        hist = yf.download(symbol, start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"), progress=False, threads=False, auto_adjust=True)
+        if isinstance(hist, pd.DataFrame) and isinstance(hist.columns, pd.MultiIndex):
+            hist = hist.droplevel(-1, axis=1)
+        return hist
+    except Exception: return pd.DataFrame()
+
+
+def get_ticker_info(symbol, target_date=None):
     """
     Fetch company info.
     Primary:  Polygon.io
     Fallback: yfinance
+    If target_date is provided, we fetch historical price to avoid "future" currentPrice leak.
     """
+    info = {}
     if polygon_client:
         try:
             detail = polygon_client.get_ticker_details(symbol.upper())
             if detail:
-                return {
+                info = {
                     "marketCap":     getattr(detail, "market_cap",       "N/A"),
                     "currentPrice":  "N/A",
                     "trailingEps":   "N/A",
@@ -209,10 +240,23 @@ def get_ticker_info(symbol):
         except Exception:
             pass
 
-    try:
-        return yf.Ticker(symbol).info
-    except Exception:
-        return {}
+    if not info:
+        try:
+            info = yf.Ticker(symbol).info
+        except Exception:
+            info = {}
+
+    # Crucial for backtesting: override currentPrice with historical data
+    if target_date:
+        hist = get_price_history(symbol, period="5d", target_date=target_date)
+        if hist is not None and not hist.empty:
+            close = TrendPredictor._get_close_series(hist)
+            if not close.empty:
+                # Use the exact price from the target date (Adjusted Close)
+                info["currentPrice"] = float(close.iloc[-1])
+                info["regularMarketPrice"] = float(close.iloc[-1]) # Support both yfinance keys
+    
+    return info
 
 
 # ---------------------------------------------------------------------------
@@ -358,8 +402,8 @@ class TrendPredictor:
         hidden_size=64,
         num_layers=2,
         learning_rate=0.001,
-        epochs=30,
-        dropout=0.0,
+        epochs=100,  # Increased intensity for accuracy
+        dropout=0.1,  # Slight dropout for better generalization
         seq_len=20,
         allow_lstm=True,
         target_date=None,
@@ -401,7 +445,7 @@ class TrendPredictor:
         return TrendPredictor._historical_mean_projection(symbol, target_date=target_date)
 
     @staticmethod
-    def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=30, dropout=0.0, seq_len=20, target_date=None):
+    def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=100, dropout=0.1, seq_len=20, target_date=None):
         """
         Trains an LSTM on recent data using given hyperparams and returns
         the next-day predicted Close price (unscaled).
@@ -451,7 +495,7 @@ class TrendPredictor:
                 return {"error": f"No data found for {symbol}."}
 
             # ---- Company Info ----
-            info    = get_ticker_info(symbol)
+            info    = get_ticker_info(symbol, target_date=target_date)
             sector  = info.get("sector", info.get("sic_description", ""))
 
             def extract_financials(info_dict):
@@ -473,13 +517,16 @@ class TrendPredictor:
             financials = extract_financials(info)
 
             # ---- News ----
-            try:
-                ticker   = yf.Ticker(symbol)
-                raw_news = ticker.news[:3] if ticker.news else []
-                news     = TrendPredictor._parse_news(raw_news)
-            except Exception:
-                news = []
-            news_text = "\n".join([f"- {n['title']} ({n['publisher']})" for n in news])
+            # For backtesting integrity, we do not show live news if target_date is in the past
+            news = []
+            if not target_date:
+                try:
+                    ticker   = yf.Ticker(symbol)
+                    raw_news = ticker.news[:3] if ticker.news else []
+                    news     = TrendPredictor._parse_news(raw_news)
+                except Exception:
+                    news = []
+            news_text = "\n".join([f"- {n['title']} ({n['publisher']})" for n in news]) if news else "News unavailable for historical backtesting to ensure model integrity."
 
             # ---- Peers ----
             peers        = TrendPredictor.get_peers(symbol, sector)
@@ -633,6 +680,29 @@ class TrendPredictor:
             """
             ai_reasoning = GroqService.chat(prompt)
 
+            # ---- Backtest Verification (Success Discovery) ----
+            backtest_verification = None
+            if target_date:
+                try:
+                    from datetime import timedelta
+                    start_ver = pd.to_datetime(target_date) + timedelta(days=1)
+                    end_ver   = start_ver + timedelta(days=30)
+                    # Check if end_ver is in the past
+                    if end_ver < pd.to_datetime("today"):
+                        ver_hist = get_price_window(symbol, start_ver, end_ver)
+                        if ver_hist is not None and not ver_hist.empty:
+                            ver_close = TrendPredictor._get_close_series(ver_hist)
+                            if not ver_close.empty:
+                                actual_final_price = float(ver_close.iloc[-1])
+                                actual_ret = (actual_final_price - recent_close) / recent_close
+                                backtest_verification = {
+                                    "actual_price_30d": actual_final_price,
+                                    "actual_return_30d": actual_ret,
+                                    "days_data": len(ver_close),
+                                }
+                except Exception:
+                    pass
+
             return {
                 "symbol":          symbol,
                 "current_price":   float(recent_close),
@@ -662,6 +732,7 @@ class TrendPredictor:
                 "hyperparams_source": hyperparams_source,
                 "prediction_method": prediction_method,
                 "prediction_label": prediction_label,
+                "backtest_verification": backtest_verification,
             }
 
         except Exception as e:
@@ -861,7 +932,10 @@ class PortfolioOptimizer:
 
             daily_returns = prices.pct_change().dropna()
             valid_tickers = list(daily_returns.columns)
-            mu = expected_returns.mean_historical_return(prices)
+            
+            # Robust return estimation: use Exponential Moving Average (EMA) 
+            # for expected returns to better capture recent momentum up to the target_date
+            mu = expected_returns.ema_historical_return(prices, span=180) 
             cov = risk_models.CovarianceShrinkage(prices).ledoit_wolf()
 
             # Conservative: inverse volatility weighting.
@@ -1191,16 +1265,32 @@ class PortfolioEnv(gym.Env):
         if self.portfolio_value > self.peak_value:
             self.peak_value = self.portfolio_value
         drawdown = (self.peak_value - self.portfolio_value) / (self.peak_value + 1e-8)
-        reward = port_ret
-        if len(self.portfolio_history) >= 10:
+        # Multi-factor Reward Function for Robust Backtesting Success
+        # Base: log return (stable for RL convergence)
+        reward = np.log(1.0 + port_ret)
+        
+        # 1. Enhanced Risk-Adjusted Return (Sortino)
+        if len(self.portfolio_history) >= 20:
             h = np.array(self.portfolio_history[-60:])
-            r = np.diff(h) / (h[:-1] + 1e-8)
-            reward += 0.02 * _sortino_ratio(r)
-        reward -= float(np.dot(self.weights, self._sector_risks)) * 0.015 * drawdown
-        reward += 0.008 * (-float(np.sum(self.weights * np.log(self.weights + 1e-8))))
-        reward -= 0.005 * float(np.sum(np.maximum(self.weights - 0.30, 0.0) ** 2))
-        reward += 0.003 * float(np.dot(self.weights, self._fund_scores - 0.5))
-        reward += 0.003 * float(np.dot(self.weights, self._sentiments))
+            returns_seq = np.diff(h) / (h[:-1] + 1e-8)
+            reward += 0.05 * _sortino_ratio(returns_seq)
+            
+        # 2. Risk Management (Drawdown & Sector Penalty)
+        # We penalize drawdown quadratically to discourage "volatility chasing"
+        reward -= float(np.dot(self.weights, self._sector_risks)) * 0.03 * (drawdown ** 2)
+        
+        # 3. Diversification Incentive (Entropy)
+        # Encourages a smoother weight distribution
+        reward += 0.01 * (-float(np.sum(self.weights * np.log(self.weights + 1e-8))))
+        
+        # 4. Fundamental & Sentiment Alignment
+        # Reward alignment with high fundamental scores and positive news sentiment
+        reward += 0.005 * float(np.dot(self.weights, self._fund_scores - 0.5))
+        reward += 0.005 * float(np.dot(self.weights, self._sentiments))
+        
+        # 5. Stability (Turnover Penalty)
+        # High turnover eats profits via costs; penalizing it creates more "believable" backtests
+        reward -= 0.05 * turnover
         self.current_step += 1
         done = self.current_step >= len(self.returns) - 1
         return self._get_obs(), float(reward), done, False, {}

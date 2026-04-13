@@ -78,6 +78,38 @@ if st.session_state.analysis_result:
                     unsafe_allow_html=True,
                 )
 
+            # ---- Backtest Verification (New Feature) ----
+            verification = data.get("backtest_verification")
+            if verification:
+                actual_ret = verification["actual_return_30d"] * 100
+                pred_ret   = ((data["predicted_price"] - data["current_price"]) / data["current_price"]) * 100
+                
+                # Success Logic: Did we get the direction right?
+                success = (actual_ret > 0 and pred_ret > 0) or (actual_ret < 0 and pred_ret < 0)
+                success_color = "#00FF94" if success else "#FF4466"
+                
+                st.markdown(f"""
+                <div style="background:rgba(0,255,148,0.05);border:1px solid {success_color}33;
+                border-left:4px solid {success_color};padding:1.25rem;border-radius:4px;margin:1.5rem 0;">
+                    <div style="font-family:'IBM Plex Mono',monospace;font-size:0.65rem;
+                    letter-spacing:0.2em;text-transform:uppercase;color:#7A9BB5;margin-bottom:0.8rem;">
+                    🎯 Backtest Verification (30-Day Actual Outcome)</div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;">
+                        <div>
+                            <div style="font-size:0.58rem;color:#5BC0EB;text-transform:uppercase;margin-bottom:0.2rem;">Actual Return</div>
+                            <div style="font-family:'IBM Plex Mono',monospace;font-size:1.2rem;color:#E8F4FD;">{actual_ret:+.2f}%</div>
+                        </div>
+                        <div>
+                            <div style="font-size:0.58rem;color:#5BC0EB;text-transform:uppercase;margin-bottom:0.2rem;">Model Predicted</div>
+                            <div style="font-family:'IBM Plex Mono',monospace;font-size:1.2rem;color:#E8F4FD;">{pred_ret:+.2f}%</div>
+                        </div>
+                    </div>
+                    <div style="margin-top:1rem;font-family:'IBM Plex Mono',monospace;font-size:0.75rem;color:{success_color};">
+                        {"✓ SUCCESS: Model correctly identified directional trend." if success else "✗ VARIANCE: Actual market conditions diverged from model projection."}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
             st.divider()
             section_label("AI Market Analysis", "#00D4FF")
             st.markdown(f"""

@@ -62,6 +62,7 @@ class TrendPredictionView(APIView):
 
 class PortfolioOptimizationView(APIView):
     def post(self, request):
+        tickers = request.data.get('tickers', [])
         risk_tolerance = request.data.get('risk_tolerance', 0.5)
         target_date = request.data.get('target_date')
         
