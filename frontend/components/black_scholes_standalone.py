@@ -334,15 +334,17 @@ def fetch_us_options(symbol: str):
 # PAGE HEADER
 # ═══════════════════════════════════════════════════════════════════════
 st.markdown("""
-<div style="border-bottom:1px solid #2A2E39;padding-bottom:0.875rem;margin-bottom:1.5rem;">
-    <span style="font-family:'Roboto Mono',monospace;font-size:0.57rem;letter-spacing:0.18em;
-    color:#2196F3;text-transform:uppercase;">Derivatives Research</span>
-    <h1 style="font-family:'Inter',sans-serif;font-size:1.35rem;font-weight:500;
-    color:#D1D4DC;margin:0.25rem 0 0 0;letter-spacing:-0.02em;">Black-Scholes Options Analyzer</h1>
-    <p style="font-family:'Inter',sans-serif;color:#787B86;margin:0.35rem 0 0 0;font-size:0.82rem;">
-        India (NSE/BSE) &amp; US (NYSE/NASDAQ) &nbsp;&mdash;&nbsp;
-        B-S Pricing &nbsp;&middot;&nbsp; Greeks &nbsp;&middot;&nbsp; Implied Vol &nbsp;&middot;&nbsp; Confidence Signals
-    </p>
+<div style="padding:0 0 8px 0;">
+<h1 style="
+    background: linear-gradient(90deg,#58a6ff,#bc8cff,#3fb950);
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+    font-weight:900; font-size:2.2rem; margin:0; letter-spacing:-0.5px;">
+    Black–Scholes Options Analyzer
+</h1>
+<p style="color:#8b949e; margin:4px 0 0 0; font-size:1rem;">
+    India (NSE/BSE · ₹) &amp; US (NYSE/NASDAQ · $) &nbsp;·&nbsp;
+    B-S Pricing · Greeks · Implied Vol · Confidence Signals
+</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -523,7 +525,7 @@ with tab_manual:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# TAB 2 — LIVE MARKET
+# TAB 2 — LIVE MARKET  (Live Option Chain Analysis)
 # ═══════════════════════════════════════════════════════════════════════
 with tab_live:
     st.markdown('<div class="sec-title">Live Option Chain Analysis</div>', unsafe_allow_html=True)
@@ -553,35 +555,98 @@ with tab_live:
         render_market_tag(live_market)
 
         with st.spinner(f"Fetching data for {live_sym}…"):
-            spot, hvol, div_yield = fetch_spot_and_vol(live_sym)
+            spot, hvol, div_yield_raw = fetch_spot_and_vol(live_sym)
 
             if spot is None:
                 st.error(f"Could not fetch price data for **{live_sym}**. Check ticker symbol.")
                 st.stop()
 
+            # ── FIX: Normalize dividend yield ─────────────────────────
+            # yfinance returns dividendYield as decimal (e.g. 0.0041)
+            # But occasionally returns values >1 for some international tickers (e.g. 41.0)
+            # Correct: clamp to realistic range [0, 0.30] annual yield
+            div_yield = float(div_yield_raw or 0.0)
+            if div_yield > 0.30:
+                # Likely returned as a percentage integer (e.g. 41.0 means 0.41%)
+                div_yield = div_yield / 100.0
+            div_yield = max(0.0, min(div_yield, 0.30))  # clamp 0–30%
+
             st.success(f"**{live_sym}** · Spot: **{live_currency}{spot:,.2f}** · "
                        f"Hist.Vol: **{hvol*100:.1f}%** · "
                        f"Div Yield: **{div_yield*100:.2f}%**")
 
-        # ── Indian market: synthetic chain ────────────────────────────
+        # ── Indian market: try yfinance options first, fall back to synthetic ─
         if live_market == "IN":
-            st.info("Indian stock options are not available via yfinance. "
-                    "Displaying a **BS-priced synthetic option chain** computed from "
-                    "live spot price + historical volatility.")
-
-            calls_df, puts_df, expiry_str, is_synth = build_indian_option_chain(
-                live_sym, spot, hvol, live_r, int(live_expiry_days)
-            )
+            calls_df = pd.DataFrame()
+            puts_df = pd.DataFrame()
+            expiry_str = None
             T_live = live_expiry_days / 365.0
-            data_source = "Synthetic (BS-priced)"
+            data_source = None
+            is_synth = False
+
+            # Attempt 1: yfinance option chain (.NS suffix required)
+            try:
+                import yfinance as _yf
+                # Ensure .NS suffix for Indian tickers
+                _sym_yf = live_sym.upper()
+                if not (_sym_yf.endswith(".NS") or _sym_yf.endswith(".BO")):
+                    _sym_yf = _sym_yf + ".NS"
+                _tkr = _yf.Ticker(_sym_yf)
+                _exps = _tkr.options  # list of expiry date strings
+                if _exps:
+                    expiry_str = _exps[0]  # nearest expiry
+                    _chain = _tkr.option_chain(expiry_str)
+                    _exp_date = datetime.strptime(expiry_str, "%Y-%m-%d")
+                    T_live = max((_exp_date - datetime.now()).days / 365.0, 0.001)
+
+                    def _prep_yf_chain(df):
+                        out = []
+                        for _, row in df.iterrows():
+                            K_val = float(row["strike"])
+                            mp = float(row.get("lastPrice", 0))
+                            iv_raw = float(row.get("impliedVolatility", 0))
+                            if mp <= 0.01 or K_val < spot * 0.75 or K_val > spot * 1.25:
+                                continue
+                            # yfinance IV is in decimal form; clamp to realistic range
+                            iv_clean = iv_raw if 0.01 <= iv_raw <= 5.0 else hvol
+                            out.append({
+                                "strike": K_val,
+                                "lastPrice": mp,
+                                "impliedVolatility": iv_clean,
+                                "contractSymbol": str(row.get("contractSymbol", "")),
+                            })
+                        return pd.DataFrame(out)
+
+                    calls_df = _prep_yf_chain(_chain.calls)
+                    puts_df  = _prep_yf_chain(_chain.puts)
+                    if not calls_df.empty:
+                        data_source = "🟢 Live (yfinance)"
+                        is_synth = False
+            except Exception:
+                pass  # fall through to synthetic
+
+            # Attempt 2: Synthetic BS fallback
+            if calls_df.empty:
+                st.info("ℹ️ yfinance option chain unavailable for this ticker. "
+                        "Displaying a **Synthetic (BS fallback using yfinance spot + historical volatility)**.")
+                calls_df, puts_df, expiry_str, is_synth = build_indian_option_chain(
+                    live_sym, spot, hvol, live_r, int(live_expiry_days)
+                )
+                T_live = live_expiry_days / 365.0
+                data_source = "🟡 Synthetic (BS fallback using yfinance spot + historical volatility)"
 
         else:
             # ── US market: real yfinance chain ────────────────────────
             result_us = fetch_us_options(live_sym)
             if len(result_us) == 6:
-                calls_raw, puts_raw, _spot, expiry_str, _hvol, div_yield = result_us
+                calls_raw, puts_raw, _spot, expiry_str, _hvol, _div_raw = result_us
+                # Normalize US dividend yield
+                _div_us = float(_div_raw or 0.0)
+                if _div_us > 0.30:
+                    _div_us = _div_us / 100.0
+                div_yield = max(0.0, min(_div_us, 0.30))
             else:
-                calls_raw = puts_raw = _spot = expiry_str = _hvol = div_yield = None
+                calls_raw = puts_raw = _spot = expiry_str = _hvol = None
 
             if calls_raw is None:
                 st.error("No options data from yfinance. Try a different US ticker (e.g. SPY, AAPL).")
@@ -598,18 +663,21 @@ with tab_live:
                     iv_raw = float(row.get("impliedVolatility", 0))
                     if mp <= 0.01 or K_val < spot * 0.80 or K_val > spot * 1.20:
                         continue
+                    # yfinance impliedVolatility is already in decimal form
+                    iv_clean = iv_raw if 0.01 <= iv_raw <= 5.0 else hvol
                     out.append({"strike": K_val, "lastPrice": mp,
-                                "impliedVolatility": iv_raw if iv_raw > 0.01 else hvol,
+                                "impliedVolatility": iv_clean,
                                 "contractSymbol": str(row.get("contractSymbol", ""))})
                 return pd.DataFrame(out)
 
             calls_df = _prep_chain(calls_raw)
             puts_df = _prep_chain(puts_raw)
-            data_source = "Live / Delayed (yfinance)"
+            data_source = "🟢 Live (yfinance)"
             is_synth = False
 
+
         st.caption(f"Option chain source: **{data_source}** · Expiry: **{expiry_str}** · "
-                   f"T = **{T_live:.4f} yrs**")
+                   f"T = **{T_live:.4f} yrs** · Div Yield used: **{div_yield*100:.2f}%**")
 
         # ── Process both sides ────────────────────────────────────────
         def process_chain(df, opt_type):
@@ -617,11 +685,21 @@ with tab_live:
             for _, row in df.iterrows():
                 K_val = float(row["strike"])
                 mkt_p = float(row["lastPrice"])
-                iv_in = float(row["impliedVolatility"])
+                iv_market = float(row["impliedVolatility"])
+
+                # Skip rows with zero market price (no trades, illiquid)
+                if mkt_p <= 0:
+                    continue
+
+                # Clamp IV to realistic range 1%–300%
+                iv_market = max(0.01, min(iv_market, 3.0))
+
                 try:
+                    # ── Use market IV as sigma for BS pricing ────────
+                    # Compute BS price using market-implied vol (not hist vol)
                     res = analyze_option(
                         S=spot, K=K_val, T=T_live, r=live_r,
-                        sigma=iv_in, q=div_yield,
+                        sigma=iv_market, q=div_yield,
                         market_price=mkt_p,
                         option_type=opt_type,
                         signal_threshold=live_threshold,
@@ -629,26 +707,57 @@ with tab_live:
                     )
                     g = res["greeks"][opt_type]
                     theo = res["theoretical_price"][opt_type]
-                    iv_s = res.get("implied_volatility")
+                    iv_solved = res.get("implied_volatility")
+
+                    # ── Clamp IV solved to 0–300% ─────────────────────
+                    if iv_solved is not None:
+                        iv_solved = max(0.0, min(iv_solved, 3.0))
+
                     sig = res.get("valuation", {})
                     conf = res.get("confidence", {})
+
+                    # ── Validate mispricing % ─────────────────────────
+                    # (Market Price - BS Price) / BS Price * 100
+                    if theo > 0:
+                        mispricing_pct = round((mkt_p - theo) / theo * 100.0, 2)
+                        # Clamp extreme values from bad inputs
+                        mispricing_pct = max(-500.0, min(500.0, mispricing_pct))
+                    else:
+                        mispricing_pct = 0.0
+
+                    # ── Validate Greeks ───────────────────────────────
+                    delta = g["delta"]
+                    gamma = g["gamma"]
+                    theta = g["theta"]
+                    vega  = g["vega"]
+
+                    # Calls: delta 0–1; Puts: delta -1–0
+                    if opt_type == "call":
+                        delta = max(0.0, min(1.0, delta))
+                    else:
+                        delta = max(-1.0, min(0.0, delta))
+                    gamma = max(0.0, gamma)   # always positive
+                    # theta: typically negative (time decay)
+                    vega  = max(0.0, vega)    # always positive
+
                     moneyness = "ATM" if abs(K_val - spot) / spot < 0.02 else (
                         "ITM" if (opt_type == "call" and K_val < spot) or
                                  (opt_type == "put" and K_val > spot) else "OTM")
+
                     rows.append({
                         "Strike": K_val,
                         "Moneyness": moneyness,
                         f"Market {live_currency}": round(mkt_p, 2),
                         f"BS Theoretical {live_currency}": round(theo, 2),
-                        "IV Input %": round(iv_in * 100, 1),
-                        "IV Solved %": round(iv_s * 100, 2) if iv_s else "—",
-                        "Mispricing %": round(sig.get("deviation_pct", 0), 2),
-                        "Δ": round(g["delta"], 3),
-                        "Γ": round(g["gamma"], 4),
-                        "Θ": round(g["theta"], 3),
-                        "ν":  round(g["vega"], 3),
+                        "IV Market %": round(iv_market * 100, 1),
+                        "IV Solved %": round(iv_solved * 100, 2) if iv_solved else "—",
+                        "Mispricing %": mispricing_pct,
+                        "Δ": round(delta, 3),
+                        "Γ": round(gamma, 4),
+                        "Θ": round(theta, 3),
+                        "ν":  round(vega, 3),
                         "ρ":  round(g["rho"], 3),
-                        "Signal": sig.get("signal", "—"),
+                        "Signal": sig.get("signal", "HOLD"),
                         "Confidence": f"{conf.get('score', 0):.0f}/100",
                     })
                 except Exception:

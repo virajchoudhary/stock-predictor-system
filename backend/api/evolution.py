@@ -145,124 +145,127 @@ def evolutionary_hpo_generator(symbol="AAPL", pop_size=5, generations=5, mutatio
     best_overall_accuracy    = None
     best_overall_chromosome  = None
 
-    for gen in range(1, generations + 1):
-        adaptive_mutation = mutation_rate * (1 - (gen - 1) / generations)
-        adaptive_mutation = max(adaptive_mutation, 0.05)  # floor at 5%
+    try:
+        for gen in range(1, generations + 1):
+            adaptive_mutation = mutation_rate * (1 - (gen - 1) / generations)
+            adaptive_mutation = max(adaptive_mutation, 0.05)  # floor at 5%
 
-        fitnesses  = []
-        accuracies = []
-        composites = []
-        for ind in population:
-            try:
-                loss, acc, composite = evaluate_chromosome(ind, symbol)
-            except Exception:
-                loss, acc, composite = float('inf'), 0.0, float('inf')
-            
-            fitnesses.append(loss)
-            accuracies.append(acc)
-            composites.append(composite)
+            fitnesses  = []
+            accuracies = []
+            composites = []
+            for ind in population:
+                try:
+                    loss, acc, composite = evaluate_chromosome(ind, symbol)
+                except Exception:
+                    loss, acc, composite = float('inf'), 0.0, float('inf')
+                
+                fitnesses.append(loss)
+                accuracies.append(acc)
+                composites.append(composite)
 
-        # Sort population by composite fitness (lower is better)
-        sorted_indices = np.argsort(composites)
-        population = [population[i] for i in sorted_indices]
-        fitnesses  = [fitnesses[i]  for i in sorted_indices]
-        accuracies = [accuracies[i] for i in sorted_indices]
-        composites = [composites[i] for i in sorted_indices]
+            # Sort population by composite fitness (lower is better)
+            sorted_indices = np.argsort(composites)
+            population = [population[i] for i in sorted_indices]
+            fitnesses  = [fitnesses[i]  for i in sorted_indices]
+            accuracies = [accuracies[i] for i in sorted_indices]
+            composites = [composites[i] for i in sorted_indices]
 
-        current_best_loss      = fitnesses[0]
-        current_best_acc       = accuracies[0]
-        current_best_composite = composites[0]
-        current_best_ind       = population[0]
+            current_best_loss      = fitnesses[0]
+            current_best_acc       = accuracies[0]
+            current_best_composite = composites[0]
+            current_best_ind       = population[0]
 
-        if current_best_composite < best_overall_composite:
-            best_overall_composite   = current_best_composite
-            best_overall_fitness_mse = current_best_loss
-            best_overall_accuracy    = current_best_acc
-            best_overall_chromosome  = current_best_ind
+            if current_best_composite < best_overall_composite:
+                best_overall_composite   = current_best_composite
+                best_overall_fitness_mse = current_best_loss
+                best_overall_accuracy    = current_best_acc
+                best_overall_chromosome  = current_best_ind
 
+            yield json.dumps({
+                "generation": gen,
+                "best_loss": current_best_loss,
+                "best_accuracy": current_best_acc,
+                "best_composite": current_best_composite,
+                "best_chromosome": {
+                    "hidden_size": current_best_ind[0],
+                    "num_layers": current_best_ind[1],
+                    "learning_rate": current_best_ind[2],
+                    "epochs": current_best_ind[3],
+                    "dropout": current_best_ind[4],
+                    "seq_len": current_best_ind[5]
+                },
+                "population": [
+                    {"chromosome": c, "loss": f, "accuracy": a, "composite": comp}
+                    for c, f, a, comp in zip(population, fitnesses, accuracies, composites)
+                ]
+            }) + "\n\n"
+
+            # --- Next generation: selection, crossover, mutation ---
+            next_population = []
+
+            # Elitism: keep top 2 chromosomes unaffected by genetic operations
+            if pop_size > 2:
+                next_population.extend(population[:2])
+            else:
+                next_population.extend(population[:1])
+
+            while len(next_population) < pop_size:
+                # Tournament selection (size 2) — uses composites
+                idx1, idx2 = random.sample(range(pop_size), 2)
+                idx3, idx4 = random.sample(range(pop_size), 2)
+                p1 = population[idx1] if composites[idx1] < composites[idx2] else population[idx2]
+                p2 = population[idx3] if composites[idx3] < composites[idx4] else population[idx4]
+
+                # Single-point crossover
+                pt = random.randint(1, 5)
+                child = p1[:pt] + p2[pt:]
+
+                # Mutation logic
+                if random.random() < adaptive_mutation:
+                    mut_idx = random.randint(0, 5)
+                    if mut_idx == 0: child[0] = random.randint(10, 128)
+                    elif mut_idx == 1: child[1] = random.randint(1, 4)
+                    elif mut_idx == 2: child[2] = round(random.uniform(0.0005, 0.05), 4)
+                    elif mut_idx == 3: child[3] = random.randint(10, 60)
+                    elif mut_idx == 4: child[4] = round(random.uniform(0.0, 0.5), 2)
+                    elif mut_idx == 5: child[5] = random.randint(10, 60)
+
+                next_population.append(child)
+
+            population = next_population
+
+        # Stream completed flag signal
         yield json.dumps({
-            "generation": gen,
-            "best_loss": current_best_loss,
-            "best_accuracy": current_best_acc,
-            "best_composite": current_best_composite,
-            "best_chromosome": {
-                "hidden_size": current_best_ind[0],
-                "num_layers": current_best_ind[1],
-                "learning_rate": current_best_ind[2],
-                "epochs": current_best_ind[3],
-                "dropout": current_best_ind[4],
-                "seq_len": current_best_ind[5]
-            },
-            "population": [
-                {"chromosome": c, "loss": f, "accuracy": a, "composite": comp}
-                for c, f, a, comp in zip(population, fitnesses, accuracies, composites)
-            ]
+            "status": "completed",
+            "best_overall_loss": best_overall_fitness_mse,
+            "best_overall_accuracy": best_overall_accuracy,
+            "best_overall_composite": best_overall_composite,
+            "best_overall_chromosome": {
+                "hidden_size": best_overall_chromosome[0],
+                "num_layers": best_overall_chromosome[1],
+                "learning_rate": best_overall_chromosome[2],
+                "epochs": best_overall_chromosome[3],
+                "dropout": best_overall_chromosome[4],
+                "seq_len": best_overall_chromosome[5]
+            }
         }) + "\n\n"
 
-        # --- Next generation: selection, crossover, mutation ---
-        next_population = []
-
-        # Elitism: keep top 2 chromosomes unaffected by genetic operations
-        if pop_size > 2:
-            next_population.extend(population[:2])
-        else:
-            next_population.extend(population[:1])
-
-        while len(next_population) < pop_size:
-            # Tournament selection (size 2) — uses composites
-            idx1, idx2 = random.sample(range(pop_size), 2)
-            idx3, idx4 = random.sample(range(pop_size), 2)
-            p1 = population[idx1] if composites[idx1] < composites[idx2] else population[idx2]
-            p2 = population[idx3] if composites[idx3] < composites[idx4] else population[idx4]
-
-            # Single-point crossover
-            pt = random.randint(1, 5)
-            child = p1[:pt] + p2[pt:]
-
-            # Mutation logic
-            if random.random() < adaptive_mutation:
-                mut_idx = random.randint(0, 5)
-                if mut_idx == 0: child[0] = random.randint(10, 128)
-                elif mut_idx == 1: child[1] = random.randint(1, 4)
-                elif mut_idx == 2: child[2] = round(random.uniform(0.0005, 0.05), 4)
-                elif mut_idx == 3: child[3] = random.randint(10, 60)
-                elif mut_idx == 4: child[4] = round(random.uniform(0.0, 0.5), 2)
-                elif mut_idx == 5: child[5] = random.randint(10, 60)
-
-            next_population.append(child)
-
-        population = next_population
-
-    # Stream completed flag signal
-    yield json.dumps({
-        "status": "completed",
-        "best_overall_loss": best_overall_fitness_mse,
-        "best_overall_accuracy": best_overall_accuracy,
-        "best_overall_composite": best_overall_composite,
-        "best_overall_chromosome": {
-            "hidden_size": best_overall_chromosome[0],
-            "num_layers": best_overall_chromosome[1],
-            "learning_rate": best_overall_chromosome[2],
-            "epochs": best_overall_chromosome[3],
-            "dropout": best_overall_chromosome[4],
-            "seq_len": best_overall_chromosome[5]
-        }
-    }) + "\n\n"
-
-    # Persist the best result to the database
-    try:
-        from .models import OptimizedHyperparams
-        OptimizedHyperparams.objects.create(
-            symbol               = symbol.upper(),
-            hidden_size          = best_overall_chromosome[0],
-            num_layers           = best_overall_chromosome[1],
-            learning_rate        = best_overall_chromosome[2],
-            epochs               = best_overall_chromosome[3],
-            dropout              = best_overall_chromosome[4],
-            seq_len              = best_overall_chromosome[5],
-            val_mse              = best_overall_fitness_mse,
-            directional_accuracy = best_overall_accuracy,
-            composite_fitness    = best_overall_composite
-        )
-    except Exception:
-        pass  # never crash the stream on DB failure
+        # Persist the best result to the database
+        try:
+            from .models import OptimizedHyperparams
+            OptimizedHyperparams.objects.create(
+                symbol               = symbol.upper(),
+                hidden_size          = best_overall_chromosome[0],
+                num_layers           = best_overall_chromosome[1],
+                learning_rate        = best_overall_chromosome[2],
+                epochs               = best_overall_chromosome[3],
+                dropout              = best_overall_chromosome[4],
+                seq_len              = best_overall_chromosome[5],
+                val_mse              = best_overall_fitness_mse,
+                directional_accuracy = best_overall_accuracy,
+                composite_fitness    = best_overall_composite
+            )
+        except Exception:
+            pass  # never crash the stream on DB failure
+    except GeneratorExit:
+        return

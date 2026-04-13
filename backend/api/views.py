@@ -295,3 +295,29 @@ def rl_hpo_cache_clear(request):
         return Response({'status': 'no_cache', 'tickers': tickers})
     except Exception as exc:
         return Response({'error': str(exc)}, status=500)
+
+def stream_evolution(request):
+    symbol = request.GET.get('symbol', 'AAPL')
+    try:
+        pop_size = int(request.GET.get('pop_size', 5))
+    except ValueError:
+        pop_size = 5
+    try:
+        generations = int(request.GET.get('generations', 5))
+    except ValueError:
+        generations = 5
+    try:
+        mutation_rate = float(request.GET.get('mutation_rate', 0.2))
+    except ValueError:
+        mutation_rate = 0.2
+
+    from .evolution import evolutionary_hpo_generator
+    return StreamingHttpResponse(
+        evolutionary_hpo_generator(
+            symbol=symbol,
+            pop_size=pop_size,
+            generations=generations,
+            mutation_rate=mutation_rate
+        ),
+        content_type='application/x-ndjson'
+    )

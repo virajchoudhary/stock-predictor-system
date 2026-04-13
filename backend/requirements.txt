@@ -18,7 +18,7 @@ scikit-learn
 cvxpy
 
 # Deep Learning (replaced tensorflow)
-torch
+torch>=1.11
 torchvision
 
 # Portfolio Optimisation (Riskfolio-Lib — HRP, CVaR, Mean-Variance)
@@ -49,3 +49,5 @@ redis==5.0.1
 django-celery-beat==2.6.0
 
 django-cors-headers==4.9.0
+stable-baselines3
+gymnasium

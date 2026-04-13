@@ -1,6 +1,3 @@
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-warnings.filterwarnings("ignore", message=".*keyword arguments.*deprecated.*")
 import streamlit as st
 import requests
 import pandas as pd
@@ -47,13 +44,14 @@ if st.session_state.analysis_result:
 
         with tab_overview:
             col1, col2, col3 = st.columns(3)
+            currency_sym = "₹" if symbol.upper().endswith(".NS") or symbol.upper().endswith(".BO") else "$"
             with col1:
-                st.metric("Current Price", f"${data['current_price']:.2f}")
+                st.metric("Current Price", f"{currency_sym}{data['current_price']:.2f}")
             with col2:
                 pred_price = data["predicted_price"]
                 curr_price = data["current_price"]
                 pct_change = ((pred_price - curr_price) / curr_price) * 100
-                st.metric("30-Day Forecast", f"${pred_price:.2f}", delta=f"{pct_change:.2f}%")
+                st.metric("30-Day Forecast", f"{currency_sym}{pred_price:.2f}", delta=f"{pct_change:.2f}%")
             with col3:
                 trend = data["trend"]
                 trend_color = "#00FF94" if trend == "UP" else "#FF4466"
