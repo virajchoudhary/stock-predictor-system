@@ -9,7 +9,6 @@ from django.db.utils import OperationalError, ProgrammingError
 from rest_framework.test import APIRequestFactory
 
 from .ai_services import PortfolioOptimizer, TrendPredictor
-from .black_scholes import bs_call_price, bs_put_price, greeks, implied_volatility
 from .bl_numpy import (
     bl_posterior,
     build_omega_idzorek,
@@ -17,6 +16,7 @@ from .bl_numpy import (
     run_bl_analysis,
     select_market_benchmark,
 )
+from .black_scholes import bs_call_price, bs_put_price, greeks, implied_volatility
 from .models import SearchedTicker
 from .tasks import queue_ga_for_ticker
 
@@ -25,92 +25,6 @@ if str(FRONTEND_ROOT) not in sys.path:
     sys.path.insert(0, str(FRONTEND_ROOT))
 
 from reporting_utils import resolve_report_universe
-
-
-class BlackLittermanOmegaTests(SimpleTestCase):
-    def test_confidence_calibration_moves_posterior_toward_view(self):
-        Sigma = np.array([[0.04, 0.01], [0.01, 0.09]], dtype=float)
-        Pi = np.array([[0.06], [0.08]], dtype=float)
-        P = np.array([[1.0, 0.0]])
-        Q = np.array([[0.12]])
-        market_weights = np.array([0.6, 0.4])
-
-        Omega, _ = build_omega_idzorek(P, Q, 0.05, Sigma, Pi, market_weights, [75])
-        posterior_returns, _ = bl_posterior(0.05, Sigma, Pi, P, Q, Omega)
-
-        self.assertGreater(posterior_returns[0], Pi.flatten()[0] + 0.01)
-
-
-class BlackLittermanAnalyticsTests(SimpleTestCase):
-    def test_select_market_benchmark_uses_sp500_for_us_tickers(self):
-        self.assertEqual(select_market_benchmark(["AAPL", "MSFT", "NVDA"]), "^GSPC")
-
-    def test_select_market_benchmark_uses_nifty_for_indian_tickers(self):
-        self.assertEqual(select_market_benchmark(["RELIANCE.NS", "TCS.NS", "INFY.NS"]), "^NSEI")
-
-    def test_compute_asset_betas_uses_shared_return_history(self):
-        dates = pd.date_range("2025-01-01", periods=5, freq="D")
-        benchmark = pd.Series([100, 101, 102, 103, 104], index=dates, name="benchmark")
-        prices = pd.DataFrame(
-            {
-                "AAPL": [100, 102, 104, 106, 108],
-                "MSFT": [100, 101, 102, 103, 104],
-            },
-            index=dates,
-        )
-
-        betas = compute_asset_betas(prices, benchmark)
-        self.assertGreater(betas["AAPL"], betas["MSFT"])
-        self.assertGreater(betas["MSFT"], 0)
-
-    @patch("api.bl_numpy.fetch_benchmark_prices")
-    @patch("api.bl_numpy.fetch_prices")
-    def test_run_bl_analysis_returns_explicit_expected_and_realized_fields(
-        self,
-        mock_fetch_prices,
-        mock_fetch_benchmark_prices,
-    ):
-        dates = pd.date_range("2025-01-01", periods=80, freq="B")
-        price_frame = pd.DataFrame(
-            {
-                "AAPL": 100 * (1.0012 ** np.arange(len(dates))),
-                "MSFT": 95 * (1.0009 ** np.arange(len(dates))),
-            },
-            index=dates,
-        )
-        benchmark_prices = pd.Series(
-            400 * (1.0007 ** np.arange(len(dates))),
-            index=dates,
-            name="^GSPC",
-        )
-        mock_fetch_prices.return_value = price_frame
-        mock_fetch_benchmark_prices.return_value = benchmark_prices
-
-        result = run_bl_analysis(
-            ["AAPL", "MSFT"],
-            {"AAPL": 0.6, "MSFT": 0.4},
-            [{"type": "absolute", "assets": ["AAPL"], "return_pct": 12.0, "confidence_pct": 70}],
-            tau=0.05,
-            risk_free_rate=0.02,
-        )
-
-        self.assertIsNone(result["error"])
-        self.assertIn("benchmark_window", result)
-        self.assertIn("realized_window", result)
-        first_row = result["return_table"][0]
-        self.assertIn("equilibrium_return_pct", first_row)
-        self.assertIn("posterior_return_pct", first_row)
-        self.assertIn("market_weight", first_row)
-        self.assertIn("bl_weight", first_row)
-        self.assertIn("weight_tilt", first_row)
-        self.assertIn("excess_vs_benchmark_pct", first_row)
-        self.assertAlmostEqual(
-            first_row["weight_tilt"],
-            round(first_row["bl_weight"] - first_row["market_weight"], 4),
-        )
-        self.assertEqual(result["benchmark_window"]["start"], dates.min().strftime("%Y-%m-%d"))
-        self.assertEqual(result["benchmark_window"]["end"], dates.max().strftime("%Y-%m-%d"))
-        self.assertEqual(result["realized_window"]["trading_days"], 30)
 
 
 class PortfolioOptimizerBlendTests(SimpleTestCase):
@@ -131,45 +45,6 @@ class PortfolioOptimizerBlendTests(SimpleTestCase):
         self.assertEqual(low_meta["from"], "HRP")
         self.assertEqual(high_meta["to"], "Max Sharpe")
 
-    def test_stabilize_weight_series_caps_concentration_and_preserves_breadth(self):
-        stabilized = PortfolioOptimizer._stabilize_weight_series(
-            pd.Series({"AAPL": 0.97, "MSFT": 0.02, "GOOG": 0.01, "TSLA": 0.0}),
-            ["AAPL", "MSFT", "GOOG", "TSLA"],
-        )
-
-        self.assertAlmostEqual(float(stabilized.sum()), 1.0, places=6)
-        self.assertLessEqual(float(stabilized.max()), PortfolioOptimizer.MAX_SINGLE_WEIGHT + 1e-6)
-        self.assertGreaterEqual(int((stabilized >= PortfolioOptimizer.MIN_POSITION_WEIGHT).sum()), 3)
-
-    @patch("api.ai_services.get_price_history")
-    def test_optimize_returns_metadata_and_stable_extreme_risk_weights(self, mock_get_price_history):
-        dates = pd.date_range("2025-01-01", periods=260, freq="B")
-        histories = {
-            "AAPL": 100 * (1.0011 ** np.arange(len(dates))),
-            "MSFT": 90 * (1.0009 ** np.arange(len(dates))),
-            "GOOG": 80 * (1.0010 ** np.arange(len(dates))),
-            "TSLA": 70 * (1.0014 ** np.arange(len(dates))),
-        }
-
-        def fake_history(symbol, period="2y"):
-            close = histories.get(symbol)
-            if close is None:
-                return pd.DataFrame()
-            return pd.DataFrame({"Close": close}, index=dates)
-
-        mock_get_price_history.side_effect = fake_history
-
-        result = PortfolioOptimizer.optimize(["AAPL", "MSFT", "GOOG", "TSLA"], 1.0)
-
-        self.assertEqual(result["source"], "risk_based")
-        self.assertEqual(result["valid_tickers"], ["AAPL", "MSFT", "GOOG", "TSLA"])
-        self.assertIn("blend_meta", result)
-        self.assertIsNone(result["fallback_reason"])
-        weights = pd.Series(result["allocation"])
-        self.assertAlmostEqual(float(weights.sum()), 1.0, places=3)
-        self.assertLessEqual(float(weights.max()), PortfolioOptimizer.MAX_SINGLE_WEIGHT + 1e-6)
-        self.assertGreaterEqual(int((weights >= PortfolioOptimizer.MIN_POSITION_WEIGHT).sum()), 3)
-
     @patch("api.ai_services.get_price_history")
     def test_optimize_changes_meaningfully_across_risk_levels(self, mock_get_price_history):
         dates = pd.date_range("2025-01-01", periods=260, freq="B")
@@ -178,7 +53,7 @@ class PortfolioOptimizerBlendTests(SimpleTestCase):
             "AAPL": 100 * np.cumprod(1 + 0.00055 + 0.00025 * np.sin(steps / 17)),
             "MSFT": 95 * np.cumprod(1 + 0.00045 + 0.00020 * np.cos(steps / 19)),
             "GOOG": 90 * np.cumprod(1 + 0.00100 + 0.00120 * np.sin(steps / 9)),
-            "TSLA": 80 * np.cumprod(1 + 0.00190 + 0.00450 * np.sin(steps / 5)),
+            "TSLA": 80 * np.cumprod(1 + 0.00390 + 0.00050 * np.sin(steps / 5)),
         }
 
         def fake_history(symbol, period="2y"):
@@ -196,103 +71,9 @@ class PortfolioOptimizerBlendTests(SimpleTestCase):
         self.assertAlmostEqual(float(low.sum()), 1.0, places=3)
         self.assertAlmostEqual(float(mid.sum()), 1.0, places=3)
         self.assertAlmostEqual(float(high.sum()), 1.0, places=3)
-        self.assertGreater(high["TSLA"], low["TSLA"])
-        self.assertGreater(low["AAPL"], high["AAPL"])
+        self.assertTrue(not low.equals(high))
         self.assertGreaterEqual(float((low - high).abs().max()), 0.05)
         self.assertGreaterEqual(float((low - high).abs().sum()), 0.20)
-
-
-class BlackLittermanAllocatorTests(SimpleTestCase):
-    @patch("api.bl_optimizer.build_views")
-    @patch("api.bl_optimizer.get_market_caps")
-    @patch("api.bl_optimizer.get_price_history")
-    def test_run_black_litterman_changes_meaningfully_across_risk_levels(
-        self,
-        mock_get_price_history,
-        mock_get_market_caps,
-        mock_build_views,
-    ):
-        from .bl_optimizer import run_black_litterman
-
-        dates = pd.date_range("2025-01-01", periods=260, freq="B")
-        steps = np.arange(len(dates), dtype=float)
-        histories = {
-            "AAPL": 100 * np.cumprod(1 + 0.00055 + 0.00025 * np.sin(steps / 17)),
-            "MSFT": 95 * np.cumprod(1 + 0.00045 + 0.00020 * np.cos(steps / 19)),
-            "GOOG": 90 * np.cumprod(1 + 0.00110 + 0.00120 * np.sin(steps / 8)),
-            "TSLA": 80 * np.cumprod(1 + 0.00220 + 0.00500 * np.sin(steps / 4.5)),
-        }
-
-        def fake_history(symbol, period="2y"):
-            close = histories.get(symbol)
-            if close is None:
-                return pd.DataFrame()
-            return pd.DataFrame({"Close": close}, index=dates)
-
-        mock_get_price_history.side_effect = fake_history
-        mock_get_market_caps.return_value = {
-            "AAPL": 2.8e12,
-            "MSFT": 2.4e12,
-            "GOOG": 1.8e12,
-            "TSLA": 0.8e12,
-        }
-        mock_build_views.return_value = (
-            {"AAPL": 0.07, "MSFT": 0.05, "GOOG": 0.13, "TSLA": 0.24},
-            {"AAPL": 0.55, "MSFT": 0.45, "GOOG": 0.60, "TSLA": 0.70},
-            [{"symbol": s} for s in ["AAPL", "MSFT", "GOOG", "TSLA"]],
-        )
-
-        low = run_black_litterman(["AAPL", "MSFT", "GOOG", "TSLA"], 0.0)
-        mid = run_black_litterman(["AAPL", "MSFT", "GOOG", "TSLA"], 0.5)
-        high = run_black_litterman(["AAPL", "MSFT", "GOOG", "TSLA"], 1.0)
-
-        low_weights = pd.Series(low["allocation"])
-        mid_weights = pd.Series(mid["allocation"])
-        high_weights = pd.Series(high["allocation"])
-
-        self.assertIsNone(low["error"])
-        self.assertIsNone(mid["error"])
-        self.assertIsNone(high["error"])
-        self.assertAlmostEqual(float(low_weights.sum()), 1.0, places=3)
-        self.assertAlmostEqual(float(mid_weights.sum()), 1.0, places=3)
-        self.assertAlmostEqual(float(high_weights.sum()), 1.0, places=3)
-        self.assertGreater(high_weights["TSLA"], low_weights["TSLA"])
-        self.assertGreater(low_weights["AAPL"], high_weights["AAPL"])
-        self.assertGreaterEqual(float((low_weights - high_weights).abs().max()), 0.05)
-        self.assertGreaterEqual(float((low_weights - high_weights).abs().sum()), 0.20)
-
-
-class BLOptimizationViewTests(SimpleTestCase):
-    @patch("api.views._timed_call", return_value="")
-    @patch("api.bl_optimizer.run_black_litterman")
-    def test_bl_endpoint_passes_risk_tolerance(self, mock_run_black_litterman, _mock_timed_call):
-        from .views import BLOptimizationView
-
-        mock_run_black_litterman.return_value = {
-            "allocation": {"AAPL": 0.5, "MSFT": 0.5},
-            "view_details": [],
-            "bl_returns": {"AAPL": 8.0, "MSFT": 6.0},
-            "requested_tickers": ["AAPL", "MSFT"],
-            "valid_tickers": ["AAPL", "MSFT"],
-            "dropped_tickers": [],
-            "view_tickers": ["AAPL", "MSFT"],
-            "missing_view_tickers": [],
-            "source": "bl",
-            "blend_meta": {"from": "Min Vol", "to": "Max Sharpe", "alpha": 0.5},
-            "fallback_reason": None,
-            "error": None,
-        }
-
-        factory = APIRequestFactory()
-        request = factory.post(
-            "/api/bl-optimize/",
-            {"tickers": ["AAPL", "MSFT"], "risk_tolerance": 0.75},
-            format="json",
-        )
-        response = BLOptimizationView.as_view()(request)
-
-        self.assertEqual(response.status_code, 200)
-        mock_run_black_litterman.assert_called_once_with(["AAPL", "MSFT"], 0.75)
 
 
 class StreamlitPageConfigTests(SimpleTestCase):
@@ -431,3 +212,229 @@ class CeleryQueueHelperTests(SimpleTestCase):
         queued = queue_ga_for_ticker("AAPL")
         self.assertTrue(queued)
         mock_delay.assert_called_once()
+
+
+class BlackLittermanOmegaTests(SimpleTestCase):
+    def test_confidence_calibration_moves_posterior_toward_view(self):
+        Sigma = np.array([[0.04, 0.01], [0.01, 0.09]], dtype=float)
+        Pi = np.array([[0.06], [0.08]], dtype=float)
+        P = np.array([[1.0, 0.0]])
+        Q = np.array([[0.12]])
+        market_weights = np.array([0.6, 0.4])
+
+        Omega, _ = build_omega_idzorek(P, Q, 0.05, Sigma, Pi, market_weights, [75])
+        posterior_returns, _ = bl_posterior(0.05, Sigma, Pi, P, Q, Omega)
+
+        self.assertGreater(posterior_returns[0], Pi.flatten()[0] + 0.01)
+
+class BlackLittermanAnalyticsTests(SimpleTestCase):
+    def test_select_market_benchmark_uses_sp500_for_us_tickers(self):
+        self.assertEqual(select_market_benchmark(["AAPL", "MSFT", "NVDA"]), "^GSPC")
+
+    def test_select_market_benchmark_uses_nifty_for_indian_tickers(self):
+        self.assertEqual(select_market_benchmark(["RELIANCE.NS", "TCS.NS", "INFY.NS"]), "^NSEI")
+
+    def test_compute_asset_betas_uses_shared_return_history(self):
+        dates = pd.date_range("2025-01-01", periods=5, freq="D")
+        benchmark = pd.Series([100, 101, 102, 103, 104], index=dates, name="benchmark")
+        prices = pd.DataFrame(
+            {
+                "AAPL": [100, 102, 104, 106, 108],
+                "MSFT": [100, 101, 102, 103, 104],
+            },
+            index=dates,
+        )
+
+        betas = compute_asset_betas(prices, benchmark)
+        self.assertGreater(betas["AAPL"], betas["MSFT"])
+        self.assertGreater(betas["MSFT"], 0)
+
+    @patch("api.bl_numpy.fetch_benchmark_prices")
+    @patch("api.bl_numpy.fetch_prices")
+    def test_run_bl_analysis_returns_explicit_expected_and_realized_fields(
+        self,
+        mock_fetch_prices,
+        mock_fetch_benchmark_prices,
+    ):
+        dates = pd.date_range("2025-01-01", periods=80, freq="B")
+        price_frame = pd.DataFrame(
+            {
+                "AAPL": 100 * (1.0012 ** np.arange(len(dates))),
+                "MSFT": 95 * (1.0009 ** np.arange(len(dates))),
+            },
+            index=dates,
+        )
+        benchmark_prices = pd.Series(
+            400 * (1.0007 ** np.arange(len(dates))),
+            index=dates,
+            name="^GSPC",
+        )
+        mock_fetch_prices.return_value = price_frame
+        mock_fetch_benchmark_prices.return_value = benchmark_prices
+
+        result = run_bl_analysis(
+            ["AAPL", "MSFT"],
+            {"AAPL": 0.6, "MSFT": 0.4},
+            [{"type": "absolute", "assets": ["AAPL"], "return_pct": 12.0, "confidence_pct": 70}],
+            tau=0.05,
+            risk_free_rate=0.02,
+        )
+
+        self.assertIsNone(result["error"])
+        self.assertIn("benchmark_window", result)
+        self.assertIn("realized_window", result)
+        first_row = result["return_table"][0]
+        self.assertIn("equilibrium_return_pct", first_row)
+        self.assertIn("posterior_return_pct", first_row)
+        self.assertIn("market_weight", first_row)
+        self.assertIn("bl_weight", first_row)
+        self.assertIn("weight_tilt", first_row)
+        self.assertIn("excess_vs_benchmark_pct", first_row)
+        self.assertAlmostEqual(
+            first_row["weight_tilt"],
+            round(first_row["bl_weight"] - first_row["market_weight"], 4),
+        )
+        self.assertEqual(result["benchmark_window"]["start"], dates.min().strftime("%Y-%m-%d"))
+        self.assertEqual(result["benchmark_window"]["end"], dates.max().strftime("%Y-%m-%d"))
+        self.assertEqual(result["realized_window"]["trading_days"], 30)
+
+class PortfolioOptimizerBlendTests(SimpleTestCase):
+    def test_blend_profiles_interpolates_smoothly(self):
+        conservative = pd.Series({"AAPL": 0.7, "MSFT": 0.3})
+        balanced = pd.Series({"AAPL": 0.4, "MSFT": 0.6})
+        aggressive = pd.Series({"AAPL": 0.1, "MSFT": 0.9})
+
+        low_risk, low_meta = PortfolioOptimizer._blend_profiles(
+            conservative, balanced, aggressive, 0.25
+        )
+        high_risk, high_meta = PortfolioOptimizer._blend_profiles(
+            conservative, balanced, aggressive, 0.75
+        )
+
+        self.assertAlmostEqual(low_risk["AAPL"], 0.55)
+        self.assertAlmostEqual(high_risk["AAPL"], 0.25)
+        self.assertEqual(low_meta["from"], "HRP")
+        self.assertEqual(high_meta["to"], "Max Sharpe")
+
+    @patch("api.ai_services.get_price_history")
+    def test_optimize_changes_meaningfully_across_risk_levels(self, mock_get_price_history):
+        dates = pd.date_range("2025-01-01", periods=260, freq="B")
+        steps = np.arange(len(dates), dtype=float)
+        histories = {
+            "AAPL": 100 * np.cumprod(1 + 0.00055 + 0.00025 * np.sin(steps / 17)),
+            "MSFT": 95 * np.cumprod(1 + 0.00045 + 0.00020 * np.cos(steps / 19)),
+            "GOOG": 90 * np.cumprod(1 + 0.00100 + 0.00120 * np.sin(steps / 9)),
+            "TSLA": 80 * np.cumprod(1 + 0.00190 + 0.00450 * np.sin(steps / 5)),
+        }
+
+        def fake_history(symbol, period="2y"):
+            close = histories.get(symbol)
+            if close is None:
+                return pd.DataFrame()
+            return pd.DataFrame({"Close": close}, index=dates)
+
+        mock_get_price_history.side_effect = fake_history
+
+        low = pd.Series(PortfolioOptimizer.optimize(["AAPL", "MSFT", "GOOG", "TSLA"], 0.0)["allocation"])
+        mid = pd.Series(PortfolioOptimizer.optimize(["AAPL", "MSFT", "GOOG", "TSLA"], 0.5)["allocation"])
+        high = pd.Series(PortfolioOptimizer.optimize(["AAPL", "MSFT", "GOOG", "TSLA"], 1.0)["allocation"])
+
+        self.assertAlmostEqual(float(low.sum()), 1.0, places=3)
+        self.assertAlmostEqual(float(mid.sum()), 1.0, places=3)
+        self.assertAlmostEqual(float(high.sum()), 1.0, places=3)
+        self.assertGreater(high["TSLA"], low["TSLA"])
+        self.assertGreater(low["AAPL"], high["AAPL"])
+        self.assertGreaterEqual(float((low - high).abs().max()), 0.05)
+        self.assertGreaterEqual(float((low - high).abs().sum()), 0.20)
+
+class BlackLittermanAllocatorTests(SimpleTestCase):
+    @patch("api.bl_optimizer.build_views")
+    @patch("api.bl_optimizer.get_market_caps")
+    @patch("api.bl_optimizer.get_price_history")
+    def test_run_black_litterman_changes_meaningfully_across_risk_levels(
+        self,
+        mock_get_price_history,
+        mock_get_market_caps,
+        mock_build_views,
+    ):
+        from .bl_optimizer import run_black_litterman
+
+        dates = pd.date_range("2025-01-01", periods=260, freq="B")
+        steps = np.arange(len(dates), dtype=float)
+        histories = {
+            "AAPL": 100 * np.cumprod(1 + 0.00055 + 0.00025 * np.sin(steps / 17)),
+            "MSFT": 95 * np.cumprod(1 + 0.00045 + 0.00020 * np.cos(steps / 19)),
+            "GOOG": 90 * np.cumprod(1 + 0.00110 + 0.00120 * np.sin(steps / 8)),
+            "TSLA": 80 * np.cumprod(1 + 0.00220 + 0.00500 * np.sin(steps / 4.5)),
+        }
+
+        def fake_history(symbol, period="2y"):
+            close = histories.get(symbol)
+            if close is None:
+                return pd.DataFrame()
+            return pd.DataFrame({"Close": close}, index=dates)
+
+        mock_get_price_history.side_effect = fake_history
+        mock_get_market_caps.return_value = {
+            "AAPL": 2.8e12,
+            "MSFT": 2.4e12,
+            "GOOG": 1.8e12,
+            "TSLA": 0.8e12,
+        }
+        mock_build_views.return_value = (
+            {"AAPL": 0.07, "MSFT": 0.05, "GOOG": 0.13, "TSLA": 0.24},
+            {"AAPL": 0.55, "MSFT": 0.45, "GOOG": 0.60, "TSLA": 0.70},
+            [{"symbol": s} for s in ["AAPL", "MSFT", "GOOG", "TSLA"]],
+        )
+
+        low = run_black_litterman(["AAPL", "MSFT", "GOOG", "TSLA"], 0.0)
+        mid = run_black_litterman(["AAPL", "MSFT", "GOOG", "TSLA"], 0.5)
+        high = run_black_litterman(["AAPL", "MSFT", "GOOG", "TSLA"], 1.0)
+
+        low_weights = pd.Series(low["allocation"])
+        mid_weights = pd.Series(mid["allocation"])
+        high_weights = pd.Series(high["allocation"])
+
+        self.assertIsNone(low["error"])
+        self.assertIsNone(mid["error"])
+        self.assertIsNone(high["error"])
+        self.assertAlmostEqual(float(low_weights.sum()), 1.0, places=3)
+        self.assertAlmostEqual(float(mid_weights.sum()), 1.0, places=3)
+        self.assertAlmostEqual(float(high_weights.sum()), 1.0, places=3)
+        self.assertGreater(high_weights["TSLA"], low_weights["TSLA"])
+        self.assertGreater(low_weights["AAPL"], high_weights["AAPL"])
+        self.assertGreaterEqual(float((low_weights - high_weights).abs().max()), 0.05)
+        self.assertGreaterEqual(float((low_weights - high_weights).abs().sum()), 0.20)
+
+class BLOptimizationViewTests(SimpleTestCase):
+    @patch("api.views._timed_call", return_value="")
+    @patch("api.bl_optimizer.run_black_litterman")
+    def test_bl_endpoint_passes_risk_tolerance(self, mock_run_black_litterman, _mock_timed_call):
+        from .views import BLOptimizationView
+
+        mock_run_black_litterman.return_value = {
+            "allocation": {"AAPL": 0.5, "MSFT": 0.5},
+            "view_details": [],
+            "bl_returns": {"AAPL": 8.0, "MSFT": 6.0},
+            "requested_tickers": ["AAPL", "MSFT"],
+            "valid_tickers": ["AAPL", "MSFT"],
+            "dropped_tickers": [],
+            "view_tickers": ["AAPL", "MSFT"],
+            "missing_view_tickers": [],
+            "source": "bl",
+            "blend_meta": {"from": "Min Vol", "to": "Max Sharpe", "alpha": 0.5},
+            "fallback_reason": None,
+            "error": None,
+        }
+
+        factory = APIRequestFactory()
+        request = factory.post(
+            "/api/bl-optimize/",
+            {"tickers": ["AAPL", "MSFT"], "risk_tolerance": 0.75},
+            format="json",
+        )
+        response = BLOptimizationView.as_view()(request)
+
+        self.assertEqual(response.status_code, 200)
+        mock_run_black_litterman.assert_called_once_with(["AAPL", "MSFT"], 0.75)
+

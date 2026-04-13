@@ -474,7 +474,7 @@ class TrendPredictor:
             target_data           = financials.copy()
             target_data["Symbol"] = symbol
             peer_data.append(target_data)
-            peer_history[symbol]  = hist_daily["Close"].tolist()
+            peer_history[symbol]  = TrendPredictor._get_close_series(hist_daily).tolist()
 
             for p in peers:
                 try:
@@ -484,7 +484,7 @@ class TrendPredictor:
                     p_fin["Symbol"] = p
                     peer_data.append(p_fin)
                     if p_hist is not None and not p_hist.empty:
-                        peer_history[p] = p_hist["Close"].tolist()
+                        peer_history[p] = TrendPredictor._get_close_series(p_hist).tolist()
                 except Exception:
                     continue
 
@@ -492,10 +492,19 @@ class TrendPredictor:
             if len(hist_daily) < 50:
                 return {"error": "Not enough historical data for technical analysis."}
 
-            close  = hist_daily["Close"]
-            high   = hist_daily["High"]
-            low    = hist_daily["Low"]
-            volume = hist_daily["Volume"]
+            close  = TrendPredictor._get_close_series(hist_daily)
+
+            def _get_series(df, col):
+                if col in df:
+                    s = df[col]
+                    if isinstance(s, pd.DataFrame):
+                        return s.iloc[:, 0] if s.shape[1] >= 1 else s.squeeze()
+                    return s
+                return pd.Series(dtype=float)
+
+            high   = _get_series(hist_daily, "High")
+            low    = _get_series(hist_daily, "Low")
+            volume = _get_series(hist_daily, "Volume")
 
             # RSI
             current_rsi = float(
@@ -550,9 +559,20 @@ class TrendPredictor:
                 seq_len=seq_len,
                 allow_lstm=(hyperparams_source == "evolved"),
             )
-            predicted_price = float(forecast["predicted_price"]) if forecast else float(recent_close)
-            prediction_method = forecast["prediction_method"] if forecast else "technical_signal_fallback"
-            prediction_label = forecast["prediction_label"] if forecast else "Technical signal fallback"
+            if forecast:
+                ret = forecast.get("expected_return", 0.0)
+                if forecast.get("prediction_method") == "lstm":
+                    ret_30d = ((1.0 + ret) ** 4.28) - 1.0
+                    prediction_label = forecast.get("prediction_label", "") + " (30-day compounded)"
+                else:
+                    ret_30d = ((1.0 + ret) ** 30) - 1.0
+                    prediction_label = forecast.get("prediction_label", "") + " (30-day compounded)"
+                predicted_price = float(recent_close * (1.0 + ret_30d))
+                prediction_method = forecast.get("prediction_method", "") + "_30d"
+            else:
+                predicted_price = float(recent_close)
+                prediction_method = "technical_signal_fallback"
+                prediction_label = "Technical signal fallback"
 
             if predicted_price is not None:
                 if predicted_price > recent_close:
@@ -569,7 +589,7 @@ class TrendPredictor:
                 else:
                     trend = "NEUTRAL"
 
-            last_30_days_prices = hist_daily["Close"].tail(30).tolist()
+            last_30_days_prices = TrendPredictor._get_close_series(hist_daily).tail(30).tolist()
 
             # ---- AI Reasoning ----
             prompt = f"""
@@ -606,7 +626,7 @@ class TrendPredictor:
                 "news":            news,
                 "peer_financials": peer_data,
                 "peer_history":    peer_history,
-                "weekly_data":     hist_weekly["Close"].tolist() if hist_weekly is not None and not hist_weekly.empty else [],
+                "weekly_data":     TrendPredictor._get_close_series(hist_weekly).tolist() if hist_weekly is not None and getattr(hist_weekly, 'empty', False) is False else [],
                 "technicals": {
                     "rsi":     float(current_rsi),
                     "macd":    float(current_macd),
