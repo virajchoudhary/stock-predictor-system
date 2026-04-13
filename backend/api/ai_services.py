@@ -40,16 +40,20 @@ polygon_client  = RESTClient(api_key=polygon_api_key) if polygon_api_key else No
 # LSTM Model Definition (PyTorch)
 # ---------------------------------------------------------------------------
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=50, num_layers=1, dropout=0.0):
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.2):
         super(LSTMModel, self).__init__()
+        # Use Bidirectional LSTM for better feature extraction from market sequences
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
                             batch_first=True, 
-                            dropout=dropout if num_layers > 1 else 0.0)
+                            dropout=dropout if num_layers > 1 else 0.0,
+                            bidirectional=True)
         self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size, 1)
+        # Output is hidden_size * 2 due to bidirectional
+        self.fc = nn.Linear(hidden_size * 2, 1)
 
     def forward(self, x):
         out, _ = self.lstm(x)
+        # Take the last hidden state of both directions
         return self.fc(self.dropout(out[:, -1, :]))
 
 
@@ -624,14 +628,30 @@ class TrendPredictor:
             )
             if forecast:
                 ret = forecast.get("expected_return", 0.0)
+                # realism: Dampened Momentum logic. 
+                # Instead of raw compounding (1+r)^30, we use a logistic decay 
+                # because market signals mean-revert and don't stay linear forever.
+                import math
+                def dampen_ret(r, days, half_life=10):
+                    # Signal decays over time toward zero
+                    total_ret = 0
+                    current_r = r
+                    for _ in range(days):
+                        total_ret += current_r
+                        current_r *= (0.5 ** (1/half_life)) # exponential decay of signal
+                    return total_ret
+
                 if forecast.get("prediction_method") == "lstm":
-                    ret_30d = ((1.0 + ret) ** 4.28) - 1.0
-                    prediction_label = forecast.get("prediction_label", "") + " (30-day compounded)"
+                    # LSTM return is already weekly or next-period; we adjust it
+                    ret_30d = dampen_ret(ret / 5.0, 30, half_life=15)
+                    prediction_label = forecast.get("prediction_label", "") + " (30-day Dampened)"
                 else:
-                    ret_30d = ((1.0 + ret) ** 30) - 1.0
-                    prediction_label = forecast.get("prediction_label", "") + " (30-day compounded)"
+                    # Historical mean is very prone to being too lucky
+                    ret_30d = dampen_ret(ret, 30, half_life=7)
+                    prediction_label = forecast.get("prediction_label", "") + " (30-day Dampened)"
+                
                 predicted_price = float(recent_close * (1.0 + ret_30d))
-                prediction_method = forecast.get("prediction_method", "") + "_30d"
+                prediction_method = forecast.get("prediction_method", "") + "_dampened"
             else:
                 predicted_price = float(recent_close)
                 prediction_method = "technical_signal_fallback"
@@ -1259,7 +1279,21 @@ class PortfolioEnv(gym.Env):
         tc = TRANSACTION_COST * turnover
         self.prev_weights = self.weights.copy()
         daily_ret = self.returns.iloc[self.current_step].values
-        port_ret  = float(np.dot(self.weights, daily_ret)) - tc
+        
+        # Realism: Liquidity Penalty (Slippage)
+        # High weights in low-volume stocks cause high market impact
+        # We assume 0.1% slippage for every 1% of ADV consumed by the position
+        # (Assuming a $1M portfolio for simulation purposes)
+        ticker_adv = np.zeros(self.n_assets)
+        for i, t in enumerate(self.tickers):
+             # Proxy ADV from recent volume if available
+             ticker_adv[i] = self.ticker_features.get(t, {}).get("avg_volume_30d", 1e6)
+        
+        simulated_size = self.weights * self.portfolio_value
+        liquidity_pressure = simulated_size / (ticker_adv + 1e-8)
+        slippage_penalty = np.sum(liquidity_pressure * 0.005) # 0.5% penalty for high ADV usage
+        
+        port_ret  = float(np.dot(self.weights, daily_ret)) - tc - slippage_penalty
         self.portfolio_value *= 1 + port_ret
         self.portfolio_history.append(self.portfolio_value)
         if self.portfolio_value > self.peak_value:

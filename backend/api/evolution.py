@@ -55,6 +55,8 @@ def get_train_val_data(symbol="AAPL", seq_len=20, target_date=None):
     X = np.array(X)
     y = np.array(y).reshape(-1, 1)
 
+    # Walk-Forward / Temporal Split: 
+    # Always train on the past, validate on the future.
     train_size       = int(len(X) * 0.8)
     X_train, y_train = X[:train_size], y[:train_size]
     X_val, y_val     = X[train_size:], y[train_size:]

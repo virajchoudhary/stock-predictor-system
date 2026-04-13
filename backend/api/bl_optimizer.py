@@ -104,10 +104,18 @@ def build_views(tickers, target_date=None):
             if not forecast:
                 continue
 
+            # Realism: Apply dampening factor to views before they enter the BL engine
+            # This prevents the portfolio from being over-leveraged on a single day prediction
             predicted_price = float(forecast["predicted_price"])
             expected_return = float(forecast["expected_return"])
             prediction_method = forecast.get("prediction_method", "historical_mean_fallback")
             prediction_label = forecast.get("prediction_label", "Historical mean fallback")
+            
+            if "dampened" not in prediction_method:
+                # Fallback safeguard: manually dampen if not already done by ai_services
+                import math
+                expected_return = expected_return * math.exp(-0.05 * 30) # 5% daily decay over 30 days
+            
             if prediction_method != "lstm":
                 confidence = min(confidence, DEFAULT_CONFIDENCE)
                 if cached:
@@ -194,12 +202,22 @@ def run_black_litterman(tickers, risk_tolerance=0.5, target_date=None):
         # PyPortfolioOpt handles this via intervals — we build manually
         omega_diag = []
         view_symbols = list(views.keys())
+        # Realism: Market Volatility Regime Scaling for Omega
+        # In high-volatility periods, we inflate the uncertainty of AI views
+        market_vols = prices.pct_change().std() * np.sqrt(252)
+        avg_market_vol = market_vols.mean()
+
         for sym in view_symbols:
             conf      = confidences.get(sym, DEFAULT_CONFIDENCE)
-            # higher confidence → lower uncertainty
+            ticker_vol = market_vols.get(sym, avg_market_vol)
+            
+            # Higher ticker volatility or higher market volatility increases Omega (uncertainty)
+            vol_multiplier = 1.0 + (ticker_vol / (avg_market_vol + 1e-8))
+            
             variance  = float(cov_matrix.loc[sym, sym]) if sym in cov_matrix.index else 0.01
-            omega_val = (1 - conf) * variance
-            omega_diag.append(max(omega_val, 1e-6))  # floor to avoid singularity
+            # Omega (uncertainty) = (1-conf) * variance * vol_adjustment
+            omega_val = (1 - conf) * variance * vol_multiplier
+            omega_diag.append(max(omega_val, 1e-6))
 
         # P matrix: one row per view, identity for absolute views
         P = np.zeros((len(view_symbols), len(valid_tickers)))
