@@ -102,8 +102,7 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] { color:#e6edf3 !impor
 
 def render_signal_badge(signal: str, reasoning: str, deviation: float = 0.0):
     css = {"BUY": "badge-buy", "SELL": "badge-sell", "HOLD": "badge-hold"}[signal]
-    icon = {"BUY": "▲", "SELL": "▼", "HOLD": "●"}[signal]
-    st.markdown(f'<span class="{css}">{icon} {signal}</span>', unsafe_allow_html=True)
+    st.markdown(f'<span class="{css}">{signal}</span>', unsafe_allow_html=True)
     if reasoning:
         st.caption(reasoning)
 
@@ -620,20 +619,20 @@ with tab_live:
                     calls_df = _prep_yf_chain(_chain.calls)
                     puts_df  = _prep_yf_chain(_chain.puts)
                     if not calls_df.empty:
-                        data_source = "🟢 Live (yfinance)"
+                        data_source = "Live (yfinance)"
                         is_synth = False
             except Exception:
                 pass  # fall through to synthetic
 
             # Attempt 2: Synthetic BS fallback
             if calls_df.empty:
-                st.info("ℹ️ yfinance option chain unavailable for this ticker. "
+                st.info("yfinance option chain unavailable for this ticker. "
                         "Displaying a **Synthetic (BS fallback using yfinance spot + historical volatility)**.")
                 calls_df, puts_df, expiry_str, is_synth = build_indian_option_chain(
                     live_sym, spot, hvol, live_r, int(live_expiry_days)
                 )
                 T_live = live_expiry_days / 365.0
-                data_source = "🟡 Synthetic (BS fallback using yfinance spot + historical volatility)"
+                data_source = "Synthetic (BS fallback using yfinance spot + historical volatility)"
 
         else:
             # ── US market: real yfinance chain ────────────────────────

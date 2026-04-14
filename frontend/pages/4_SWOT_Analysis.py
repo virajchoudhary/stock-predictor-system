@@ -136,11 +136,11 @@ def rating_badge(rating: str) -> str:
     r = rating.upper().strip()
     cls = {"STRONG BUY": "rating-sb", "BUY": "rating-b",
            "HOLD": "rating-h", "SELL": "rating-s", "STRONG SELL": "rating-ss"}
-    icon = {"STRONG BUY": "⬆⬆", "BUY": "⬆", "HOLD": "◆", "SELL": "⬇", "STRONG SELL": "⬇⬇"}
+    # Pictorial icons removed for cleaner professional look
     for key in cls:
         if key in r:
-            return f'<span class="{cls[key]}">{icon[key]} {key}</span>'
-    return f'<span class="rating-h">◆ {rating}</span>'
+            return f'<span class="{cls[key]}">{key}</span>'
+    return f'<span class="rating-h">{rating}</span>'
 
 
 def flag_chip(flag: str) -> str:
@@ -150,7 +150,7 @@ def flag_chip(flag: str) -> str:
     return f'<span class="{cls}">{label}</span>'
 
 
-def render_swot_card(quadrant_key: str, title: str, emoji: str, points: list):
+def render_swot_card(quadrant_key: str, title: str, points: list):
     css_cls = {"S": "swot-S", "W": "swot-W", "O": "swot-O", "T": "swot-T"}[quadrant_key]
 
     points_html = ""
@@ -167,9 +167,8 @@ def render_swot_card(quadrant_key: str, title: str, emoji: str, points: list):
 </div>
 """
 
-    prefix = f"{emoji} " if emoji else ""
     st.markdown(f"""<div class="swot-card {css_cls}">
-<div class="swot-header">{prefix}{title}</div>
+<div class="swot-header">{title}</div>
 {points_html}
 </div>""", unsafe_allow_html=True)
 
@@ -434,15 +433,40 @@ Generated: {generated_at}
             with st.expander("Raw LLM Output"):
                 st.code(swot["raw"])
     else:
+        # Accuracy Improvement: Historical Validation Section
+        outcome = data.get("historical_outcome")
+        if outcome:
+            scol1, scol2 = st.columns([1, 1])
+            success = outcome.get("success")
+            outcome_color = "#26A69A" if success else "#EF5350"
+            with scol1:
+                st.markdown(f"""
+                <div style="background:rgba(38,166,154,0.05); border:1px solid {outcome_color}44; border-left:4px solid {outcome_color}; padding:15px; border-radius:4px;">
+                    <div style="font-family:'Roboto Mono',monospace; font-size:0.6rem; color:#787B86; letter-spacing:0.1em; text-transform:uppercase;">Historical Accuracy Verification</div>
+                    <div style="margin-top:8px; font-size:1.1rem; color:#E6EDF3;">
+                        {outcome.get('realized_return_30d'):+.2f}% <span style="font-size:0.8rem; color:#787B86;">Realized (30D)</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            with scol2:
+                status_text = "PREDICTION VERIFIED" if success else "MARKET DIVERGENCE"
+                st.markdown(f"""
+                <div style="background:rgba(38,166,154,0.05); border:1px solid {outcome_color}44; border-left:4px solid {outcome_color}; padding:15px; border-radius:4px;">
+                    <div style="font-family:'Roboto Mono',monospace; font-size:0.6rem; color:#787B86; letter-spacing:0.1em; text-transform:uppercase;">Strategy Status</div>
+                    <div style="margin-top:8px; font-size:1.1rem; color:{outcome_color}; font-weight:600;">{status_text}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+
         sw1, sw2 = st.columns(2, gap="large")
         with sw1:
-            render_swot_card("S", "STRENGTHS", "", swot.get("strengths", []))
+            render_swot_card("S", "STRENGTHS", swot.get("strengths", []))
             st.markdown("<br>", unsafe_allow_html=True)
-            render_swot_card("O", "OPPORTUNITIES", "", swot.get("opportunities", []))
+            render_swot_card("O", "OPPORTUNITIES", swot.get("opportunities", []))
         with sw2:
-            render_swot_card("W", "WEAKNESSES", "", swot.get("weaknesses", []))
+            render_swot_card("W", "WEAKNESSES", swot.get("weaknesses", []))
             st.markdown("<br>", unsafe_allow_html=True)
-            render_swot_card("T", "THREATS", "", swot.get("threats", []))
+            render_swot_card("T", "THREATS", swot.get("threats", []))
 
     # ── PEER COMPARISON ───────────────────────────────────────────────
     if peers:

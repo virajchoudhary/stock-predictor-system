@@ -10,7 +10,7 @@ from components.sidebar import render_backtest_sidebar
 
 API_URL = "http://127.0.0.1:8000/api"
 
-st.set_page_config(page_title="Dashboard - Stock Price Predictor", page_icon="▲", layout="wide")
+st.set_page_config(page_title="Dashboard - Stock Price Predictor", layout="wide")
 
 inject_css()
 target_date = render_backtest_sidebar()
@@ -93,7 +93,7 @@ if st.session_state.analysis_result:
                 border-left:4px solid {success_color};padding:1.25rem;border-radius:4px;margin:1.5rem 0;">
                     <div style="font-family:'IBM Plex Mono',monospace;font-size:0.65rem;
                     letter-spacing:0.2em;text-transform:uppercase;color:#7A9BB5;margin-bottom:0.8rem;">
-                    🎯 Backtest Verification (30-Day Actual Outcome)</div>
+                    Backtest Verification (30-Day Actual Outcome)</div>
                     <div style="display:grid;grid-template-columns:1fr 1fr;gap:2rem;">
                         <div>
                             <div style="font-size:0.58rem;color:#5BC0EB;text-transform:uppercase;margin-bottom:0.2rem;">Actual Return</div>
@@ -105,7 +105,7 @@ if st.session_state.analysis_result:
                         </div>
                     </div>
                     <div style="margin-top:1rem;font-family:'IBM Plex Mono',monospace;font-size:0.75rem;color:{success_color};">
-                        {"✓ SUCCESS: Model correctly identified directional trend." if success else "✗ VARIANCE: Actual market conditions diverged from model projection."}
+                        {"DIRECTIONAL MATCH: Model correctly identified trend." if success else "DIVERGENCE: Actual market conditions deviated from projection."}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)

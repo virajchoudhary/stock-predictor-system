@@ -646,6 +646,30 @@ def run_swot_analysis(query: str, target_date: Optional[str] = None) -> Dict:
     peers = fetch_peers(ticker, sector, market)
     swot = generate_swot(ticker, market, fundamentals, price_metrics, news, peers)
 
+    # Accuracy Improvement: Historical Backtest/Outcome Verification
+    historical_outcome = None
+    if target_date:
+        try:
+            # Look 30 days into the future from target_date to see if SWOT was right
+            future_hist = yf.download(ticker, 
+                                       start=(pd.to_datetime(target_date) + datetime.timedelta(days=1)).strftime("%Y-%m-%d"),
+                                       end=(pd.to_datetime(target_date) + datetime.timedelta(days=31)).strftime("%Y-%m-%d"),
+                                       progress=False, threads=False, auto_adjust=True)
+            if not future_hist.empty:
+                start_p = fundamentals.get("price")
+                end_p = float(future_hist["Close"].iloc[-1])
+                realized_ret = (end_p / start_p - 1) * 100
+                historical_outcome = {
+                    "start_price": start_p,
+                    "end_price_30d": end_p,
+                    "realized_return_30d": round(realized_ret, 2),
+                    "success": (realized_ret > 2.0 and "BUY" in str(swot.get("investment_rating", ""))) or 
+                               (realized_ret < -2.0 and "SELL" in str(swot.get("investment_rating", ""))) or
+                               (abs(realized_ret) <= 2.0 and "HOLD" in str(swot.get("investment_rating", "")))
+                }
+        except Exception:
+            pass
+
     return {
         "ticker": ticker,
         "market": market,
@@ -656,5 +680,6 @@ def run_swot_analysis(query: str, target_date: Optional[str] = None) -> Dict:
         "news": news,
         "peers": peers,
         "swot": swot,
+        "historical_outcome": historical_outcome,
         "generated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }

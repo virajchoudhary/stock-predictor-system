@@ -27,6 +27,8 @@ def get_train_val_data(symbol="AAPL", seq_len=20, target_date=None):
     low   = df['Low']
 
     # 5 technical features — same ones used in TrendPredictor
+    # Accuracy Improvement: More features for better signal capturing
+    # Adding Momentum and Volatility Ratio
     df['rsi']        = ta.momentum.RSIIndicator(close=close, window=14).rsi()
     df['macd_diff']  = ta.trend.MACD(close=close).macd_diff()
     df['bb_width']   = (
@@ -36,11 +38,10 @@ def get_train_val_data(symbol="AAPL", seq_len=20, target_date=None):
     df['atr']        = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
     sma20            = ta.trend.SMAIndicator(close=close, window=20).sma_indicator()
     df['sma_dist']   = (close - sma20) / sma20
-    df['obv'] = ta.volume.OnBalanceVolumeIndicator(
-        close=df['Close'], volume=df['Volume']
-    ).on_balance_volume()
-
-    feature_cols = ['Close', 'rsi', 'macd_diff', 'bb_width', 'atr', 'sma_dist', 'obv']
+    df['obv']        = ta.volume.OnBalanceVolumeIndicator(close=df['Close'], volume=df['Volume']).on_balance_volume()
+    df['momentum']   = ta.momentum.ROCIndicator(close=close, window=12).roc()
+    
+    feature_cols = ['Close', 'rsi', 'macd_diff', 'bb_width', 'atr', 'sma_dist', 'obv', 'momentum']
     df = df[feature_cols].dropna()
 
     scaler      = MinMaxScaler(feature_range=(0, 1))
@@ -132,12 +133,12 @@ def evolutionary_hpo_generator(symbol="AAPL", pop_size=5, generations=5, mutatio
     population = []
     for _ in range(pop_size):
         population.append([
-            random.randint(10, 128),
-            random.randint(1, 4),
-            round(random.uniform(0.0005, 0.05), 4),
-            random.randint(10, 60),
-            round(random.uniform(0.0, 0.5), 2),
-            random.randint(10, 60)
+            random.randint(16, 256),       # hidden_size (Increased range)
+            random.randint(2, 5),         # num_layers (Min 2 for depth)
+            round(random.uniform(0.0001, 0.01), 5), # lr (Refined range)
+            random.randint(50, 200),      # epochs (Increased for accuracy)
+            round(random.uniform(0.1, 0.4), 2),     # dropout
+            random.randint(15, 60)        # seq_len
         ])
 
     best_overall_composite   = float('inf')

@@ -628,30 +628,38 @@ class TrendPredictor:
             )
             if forecast:
                 ret = forecast.get("expected_return", 0.0)
-                # realism: Dampened Momentum logic. 
-                # Instead of raw compounding (1+r)^30, we use a logistic decay 
-                # because market signals mean-revert and don't stay linear forever.
+                # Accuracy Improvement: Adaptive Dampening based on Volatility (ATR)
+                # Instead of a fixed half-life, we adapt the signal decay to current market volatility.
+                # High volatility leads to faster signal decay.
                 import math
-                def dampen_ret(r, days, half_life=10):
-                    # Signal decays over time toward zero
+                def dampen_ret_adaptive(r, days, vol_ratio=1.0):
+                    # vol_ratio = current_atr / average_atr. 
+                    # If volatility is high, signal is less reliable over long terms.
+                    adj_half_life = 10 / (vol_ratio if vol_ratio > 0.5 else 0.5)
                     total_ret = 0
                     current_r = r
                     for _ in range(days):
                         total_ret += current_r
-                        current_r *= (0.5 ** (1/half_life)) # exponential decay of signal
+                        current_r *= (0.5 ** (1/adj_half_life))
                     return total_ret
+
+                # Calculate vol_ratio for adaptive dampening
+                vol_ratio = 1.0
+                if 'current_atr' in locals() and len(close) > 50:
+                    avg_atr = float(ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=50).average_true_range().mean())
+                    vol_ratio = current_atr / avg_atr if avg_atr > 0 else 1.0
 
                 if forecast.get("prediction_method") == "lstm":
                     # LSTM return is already weekly or next-period; we adjust it
-                    ret_30d = dampen_ret(ret / 5.0, 30, half_life=15)
-                    prediction_label = forecast.get("prediction_label", "") + " (30-day Dampened)"
+                    ret_30d = dampen_ret_adaptive(ret / 5.0, 30, vol_ratio=vol_ratio)
+                    prediction_label = forecast.get("prediction_label", "").replace("Evolved ", "") + " (30-day Adaptive)"
                 else:
                     # Historical mean is very prone to being too lucky
-                    ret_30d = dampen_ret(ret, 30, half_life=7)
-                    prediction_label = forecast.get("prediction_label", "") + " (30-day Dampened)"
+                    ret_30d = dampen_ret_adaptive(ret, 30, vol_ratio=vol_ratio)
+                    prediction_label = forecast.get("prediction_label", "") + " (30-day Adaptive)"
                 
                 predicted_price = float(recent_close * (1.0 + ret_30d))
-                prediction_method = forecast.get("prediction_method", "") + "_dampened"
+                prediction_method = forecast.get("prediction_method", "") + "_adaptive"
             else:
                 predicted_price = float(recent_close)
                 prediction_method = "technical_signal_fallback"
@@ -674,9 +682,11 @@ class TrendPredictor:
 
             last_30_days_prices = TrendPredictor._get_close_series(hist_daily).tail(30).tolist()
 
-            # ---- AI Reasoning ----
+            # ---- AI Reasoning (Emoji-Free) ----
             prompt = f"""
             Analyze the stock {symbol} (Sector: {sector}).
+            
+            IMPORTANT: Do NOT use ANY emojis in your response. Keep it professional and technical.
 
             TECHNICAL DATA:
             - Current Price:   {recent_close}
@@ -695,7 +705,7 @@ class TrendPredictor:
             RECENT NEWS: {news_text}
             PEER DATA: {peer_data}
 
-            Provide a comprehensive analysis aligned with the trend ({trend}).
+            Provide a comprehensive technical analysis aligned with the trend ({trend}).
             Reference Bollinger Bands and ATR in your volatility assessment.
             """
             ai_reasoning = GroqService.chat(prompt)

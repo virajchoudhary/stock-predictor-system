@@ -965,7 +965,7 @@ def _build_deep_report_context(
         "description": (
             f"{allocation_source_label} allocation for the requested report universe "
             f"using benchmark {benchmark_ticker}."
-            + (f" ⚠️ {benchmark_ticker} excluded from portfolio optimization — it is used as benchmark." if benchmark_excluded else "")
+            + (f" Note: {benchmark_ticker} excluded from portfolio optimization — it is used as benchmark." if benchmark_excluded else "")
         ),
         "sidebar": [
             {
@@ -987,6 +987,38 @@ def _build_deep_report_context(
             },
         ],
     }
+
+    # Accuracy Improvement: Portfolio Backtest Verification
+    # Compare generated portfolio vs benchmark over the subsequent 30 days
+    if target_date:
+        try:
+            from .reporting_utils import get_portfolio_price
+            from api.ai_services import get_price_history
+            
+            # Use test data (OOS) which covers the period after target_date
+            # Or fetch specifically for the 30 days after target_date
+            bench_after = data_full[benchmark_ticker].copy()
+            port_after = get_portfolio_price(data_full[tickers], portfolio_dict)
+            
+            # Normalize to 1.0 at target_date (iloc[-test_len] or similar)
+            # Actually, target_date is the cutoff. So data_test is what matters.
+            if not data_test.empty:
+                b_ret_oos = (data_test[benchmark_ticker].iloc[-1] / data_test[benchmark_ticker].iloc[0]) - 1
+                p_ret_oos = (get_portfolio_price(data_test[tickers], portfolio_dict).iloc[-1] / 
+                             get_portfolio_price(data_test[tickers], portfolio_dict).iloc[0]) - 1
+                
+                allocation_section["sidebar"].append({
+                    "title": "Backtest Verification (OOS)",
+                    "type": "metrics",
+                    "data": {
+                        "Portfolio Return": f"{p_ret_oos:+.2%}",
+                        "Benchmark Return": f"{b_ret_oos:+.2%}",
+                        "Alpha Extraction": f"{(p_ret_oos - b_ret_oos):+.2%}",
+                        "Verdict": "SUCCESS" if p_ret_oos > b_ret_oos else "MARKET ALPHA GAP"
+                    }
+                })
+        except Exception:
+            pass
 
     sections = [
         allocation_section,
@@ -1317,10 +1349,10 @@ def _render_swot_section(swot_data):
         # Render the four styled cards in a 2×2 grid
         # ════════════════════════════════════════════════════════════════
         card_data = [
-            ("💪 Strengths",       S, "#4ade80", "#0a1f0f"),
-            ("⚠️ Weaknesses",     W, "#fbbf24", "#1f1505"),
-            ("🚀 Opportunities",  O, "#60a5fa", "#040f1f"),
-            ("🛡️ Threats",        T, "#f87171", "#1f0507"),
+            ("Strengths",       S, "#4ade80", "#0a1f0f"),
+            ("Weaknesses",     W, "#fbbf24", "#1f1505"),
+            ("Opportunities",  O, "#60a5fa", "#040f1f"),
+            ("Threats",        T, "#f87171", "#1f0507"),
         ]
 
         row1 = st.columns(2)

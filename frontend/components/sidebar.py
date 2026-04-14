@@ -9,7 +9,7 @@ def render_backtest_sidebar():
     color:#7A9BB5;text-transform:uppercase;padding:0.25rem 0;">Simulation & Backtesting</div>
     """, unsafe_allow_html=True)
     
-    with st.sidebar.expander("⚙️ Backtest Settings", expanded=False):
+    with st.sidebar.expander("Backtest Settings", expanded=False):
         # Default to today if not set
         if "target_date" not in st.session_state:
             st.session_state.target_date = datetime.now()
