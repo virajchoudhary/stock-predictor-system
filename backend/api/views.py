@@ -302,6 +302,41 @@ def rl_hpo_cache_clear(request):
     except Exception as exc:
         return Response({'error': str(exc)}, status=500)
 
+class BacktestPredictView(APIView):
+    """
+    Model Validation / Backtesting endpoint.
+
+    GET /api/backtest-predict/<symbol>/?past_date=YYYY-MM-DD&force_retrain=true
+    Trains a fresh Bi-LSTM on history strictly before `past_date` and rolls
+    forward to today, returning metrics + predicted vs actual paths.
+    """
+    def get(self, request, symbol):
+        past_date = request.query_params.get('past_date')
+        if not past_date:
+            return Response({'error': 'past_date query parameter is required (YYYY-MM-DD).'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        force_retrain = _coerce_bool(request.query_params.get('force_retrain'), default=False)
+
+        if force_retrain:
+            # Nuke the hyperparameter cache for this symbol so the new
+            # bidirectional / log-return architecture is learned from scratch.
+            try:
+                from .models import OptimizedHyperparams
+                OptimizedHyperparams.objects.filter(symbol=symbol.upper()).delete()
+            except Exception:
+                pass
+
+        try:
+            from .backtest_engine import run_model_validation
+            result = run_model_validation(symbol=symbol.upper(), past_date=past_date)
+            if isinstance(result, dict) and result.get('error'):
+                return Response(result, status=status.HTTP_400_BAD_REQUEST)
+            return Response(result)
+        except Exception as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 def stream_evolution(request):
     symbol = request.GET.get('symbol', 'AAPL')
     try:

@@ -7,6 +7,7 @@ import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from components.style import inject_css, page_header, section_label
 from components.sidebar import render_backtest_sidebar
+from components.model_validation import render_model_validation_expander
 
 API_URL = "http://127.0.0.1:8000/api"
 
@@ -250,3 +251,6 @@ if st.session_state.analysis_result:
                             st.error("Chat error.")
                     except Exception as e:
                         st.error(f"Error: {e}")
+
+# Model Validation expander embedded at the bottom of the Dashboard page.
+render_model_validation_expander(page_prefix="dash", default_symbol=symbol or "AAPL")

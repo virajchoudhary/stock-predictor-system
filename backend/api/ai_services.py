@@ -1,5 +1,7 @@
 import os
 import json
+import math
+import random as _random
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -17,6 +19,16 @@ except Exception:
 import torch
 import torch.nn as nn
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
+
+# --- Gradient Boosted Trees (XGBoost) for non-linear threshold modelling ---
+try:
+    import xgboost as xgb
+    _HAS_XGB = True
+except Exception:
+    _HAS_XGB = False
+    from sklearn.ensemble import GradientBoostingRegressor  # fallback
 
 # --- fastembed (replaces sentence-transformers) ---
 try:
@@ -40,21 +52,307 @@ polygon_client  = RESTClient(api_key=polygon_api_key) if polygon_api_key else No
 # LSTM Model Definition (PyTorch)
 # ---------------------------------------------------------------------------
 class LSTMModel(nn.Module):
-    def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.2):
+    """
+    Stacked Bidirectional LSTM (num_layers=2) with LayerNorm + Dropout.
+    Used as the deep-memory base learner in the heterogeneous stacking ensemble.
+    """
+    def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.3):
         super(LSTMModel, self).__init__()
-        # Use Bidirectional LSTM for better feature extraction from market sequences
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
-                            batch_first=True, 
-                            dropout=dropout if num_layers > 1 else 0.0,
-                            bidirectional=True)
-        self.dropout = nn.Dropout(dropout)
-        # Output is hidden_size * 2 due to bidirectional
-        self.fc = nn.Linear(hidden_size * 2, 1)
+        self.lstm = nn.LSTM(
+            input_size, hidden_size, num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=True,
+        )
+        # LayerNorm over the concatenated bidirectional hidden state
+        self.layer_norm = nn.LayerNorm(hidden_size * 2)
+        self.dropout    = nn.Dropout(dropout)
+        self.fc         = nn.Linear(hidden_size * 2, 1)
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        # Take the last hidden state of both directions
-        return self.fc(self.dropout(out[:, -1, :]))
+        last = self.layer_norm(out[:, -1, :])
+        return self.fc(self.dropout(last))
+
+
+# ---------------------------------------------------------------------------
+# Directional-Penalty Loss
+#   Loss = MSE + 0.5 * mean(clamp(-sign(pred)*sign(target), min=0))
+# ---------------------------------------------------------------------------
+class DirectionalPenaltyLoss(nn.Module):
+    def __init__(self, penalty_weight: float = 0.5):
+        super().__init__()
+        self.mse = nn.MSELoss()
+        self.penalty_weight = penalty_weight
+
+    def forward(self, pred, target):
+        mse_term = self.mse(pred, target)
+        penalty  = torch.clamp(-torch.sign(pred) * torch.sign(target), min=0.0).mean()
+        return mse_term + self.penalty_weight * penalty
+
+
+# ---------------------------------------------------------------------------
+# Dual-Pipeline Data Preparation for the Heterogeneous Stacking Ensemble.
+#
+# Returns a dict with:
+#   * 3D tensors (batch, seq_len, features)   → Bi-LSTM
+#   * 2D flat matrix (batch, features*3)      → Tree models (XGBoost, RF)
+#   * y = next-day LOG RETURN of Close
+#   * Walk-forward split Train_A (80%) / Train_B (20% meta-learner holdout)
+#   * Inference window for next-day prediction
+#   * last_close for inverse-transform: next_price = prev * exp(pred_log_ret)
+# ---------------------------------------------------------------------------
+def _prepare_stacking_data(symbol, seq_len=20, target_date=None, holdout_frac=0.2):
+    import ta as _ta
+
+    df = get_price_history(symbol, period="2y", target_date=target_date)
+    if df is None or df.empty:
+        raise ValueError(f"No price data for {symbol}")
+
+    # Normalise column casing so downstream feature code is robust.
+    df = df.rename(columns={c: c.capitalize() for c in df.columns})
+    for needed in ('Open', 'High', 'Low', 'Close', 'Volume'):
+        if needed not in df.columns:
+            raise ValueError(f"Missing OHLCV column: {needed}")
+
+    close = df['Close']
+    high  = df['High']
+    low   = df['Low']
+
+    df['log_return'] = np.log(df['Close'] / df['Close'].shift(1))
+    df['rsi']        = _ta.momentum.RSIIndicator(close=close, window=14).rsi()
+    df['macd_diff']  = _ta.trend.MACD(close=close).macd_diff()
+    _bb              = _ta.volatility.BollingerBands(close=close, window=20)
+    df['bb_width']   = _bb.bollinger_hband() - _bb.bollinger_lband()
+    df['atr']        = _ta.volatility.AverageTrueRange(
+        high=high, low=low, close=close, window=14
+    ).average_true_range()
+    _sma20           = _ta.trend.SMAIndicator(close=close, window=20).sma_indicator()
+    df['sma_dist']   = (close - _sma20) / _sma20
+    df['momentum']   = _ta.momentum.ROCIndicator(close=close, window=12).roc()
+    df['vol_20']     = df['log_return'].rolling(20).std()
+
+    feature_cols = ['rsi', 'macd_diff', 'bb_width', 'atr', 'sma_dist', 'momentum', 'vol_20']
+    df = df[feature_cols + ['log_return', 'Close']].dropna()
+
+    if len(df) < seq_len + 50:
+        raise ValueError("Not enough clean rows for stacking data prep.")
+
+    X_feat = df[feature_cols].values.astype(np.float32)
+    y_lr   = df['log_return'].values.astype(np.float32)
+    closes = df['Close'].values.astype(np.float32)
+
+    # Scaler fit on feature matrix (tree models are scale-invariant; LSTM benefits).
+    scaler = MinMaxScaler(feature_range=(-1, 1))
+    X_scaled = scaler.fit_transform(X_feat).astype(np.float32)
+
+    # Build paired 3D and 2D samples with a log-return target.
+    X_seq, X_flat, y, prev_list = [], [], [], []
+    for i in range(len(X_scaled) - seq_len):
+        window = X_scaled[i:i + seq_len]
+        X_seq.append(window)
+        # Flat 2D feature: [latest_row, window_mean, window_std]
+        X_flat.append(
+            np.concatenate([window[-1], window.mean(axis=0), window.std(axis=0)])
+        )
+        y.append(y_lr[i + seq_len])
+        prev_list.append(closes[i + seq_len - 1])
+    X_seq    = np.asarray(X_seq, dtype=np.float32)
+    X_flat   = np.asarray(X_flat, dtype=np.float32)
+    y        = np.asarray(y, dtype=np.float32).reshape(-1, 1)
+    prev_arr = np.asarray(prev_list, dtype=np.float32)
+
+    n = len(X_seq)
+    split = int(n * (1.0 - holdout_frac))
+    # Guard: ensure at least a handful of samples in each slice.
+    split = max(seq_len, min(split, n - 10))
+
+    # Inference window: the most recent seq_len rows (no future leakage).
+    last_window = X_scaled[-seq_len:]
+    last_flat   = np.concatenate([last_window[-1], last_window.mean(axis=0), last_window.std(axis=0)])
+    last_close  = float(closes[-1])
+
+    return {
+        'X_seq_A':  X_seq[:split],  'X_flat_A':  X_flat[:split],  'y_A':  y[:split],
+        'X_seq_B':  X_seq[split:],  'X_flat_B':  X_flat[split:],  'y_B':  y[split:],
+        'prev_A':   prev_arr[:split],
+        'prev_B':   prev_arr[split:],
+        'X_seq_infer':  last_window[np.newaxis, ...].astype(np.float32),
+        'X_flat_infer': last_flat[np.newaxis, :].astype(np.float32),
+        'last_close':   last_close,
+        'input_size':   X_scaled.shape[1],
+        'scaler':       scaler,
+        'feature_cols': feature_cols,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Heterogeneous Stacking Ensemble (Level 0 bases + Level 1 meta)
+#   Base learners  : Bi-LSTM (deep memory), XGBoost (non-linear thresholds),
+#                    Random Forest (variance reduction)
+#   Meta learner   : Ridge Regression on Train_B (20% holdout) out-of-fold preds
+# ---------------------------------------------------------------------------
+class StackedEnsembleForecaster:
+    def __init__(self, input_size, hidden_size=64, num_layers=2,
+                 dropout=0.3, learning_rate=1e-3, epochs=100, seq_len=20):
+        # Absolute determinism at construction time
+        torch.manual_seed(42)
+        np.random.seed(42)
+        _random.seed(42)
+
+        # --- Model A: Stacked Bi-LSTM ---
+        self.lstm = LSTMModel(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=max(0.3, float(dropout)),  # spec requires ≥0.3
+        )
+
+        # --- Model B: XGBoost Regressor ---
+        if _HAS_XGB:
+            self.xgb_model = xgb.XGBRegressor(
+                n_estimators=100,
+                max_depth=4,
+                learning_rate=0.05,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_lambda=1.0,
+                objective='reg:squarederror',
+                tree_method='hist',
+                random_state=42,
+                n_jobs=-1,
+                verbosity=0,
+            )
+        else:
+            self.xgb_model = GradientBoostingRegressor(
+                n_estimators=100, max_depth=4, learning_rate=0.05,
+                subsample=0.8, random_state=42,
+            )
+
+        # --- Model C: Random Forest ---
+        self.rf_model = RandomForestRegressor(
+            n_estimators=100,
+            min_samples_leaf=5,
+            max_features='sqrt',
+            n_jobs=-1,
+            random_state=42,
+        )
+
+        # --- Meta Learner: Ridge regression over base predictions ---
+        self.meta = Ridge(alpha=1.0, fit_intercept=True, random_state=42)
+
+        self.learning_rate = learning_rate
+        self.epochs        = epochs
+        self.seq_len       = seq_len
+
+        # Diagnostics populated by fit()
+        self.meta_coef_      = None
+        self.meta_intercept_ = None
+        self.base_val_mae_   = {}
+
+    # ----------------- LSTM training (with early stopping + LR schedule) -----------------
+    def _train_lstm(self, X_seq, y):
+        X_t = torch.tensor(X_seq, dtype=torch.float32)
+        y_t = torch.tensor(y, dtype=torch.float32)
+
+        # Split Train_A into inner train / val for early-stopping the LSTM only.
+        n = len(X_t)
+        v_split = max(1, int(n * 0.85))
+        X_tr, X_va = X_t[:v_split], X_t[v_split:]
+        y_tr, y_va = y_t[:v_split], y_t[v_split:]
+        if len(X_va) == 0:
+            X_va, y_va = X_tr, y_tr  # fallback for tiny datasets
+
+        criterion = DirectionalPenaltyLoss(0.5)
+        optimizer = torch.optim.Adam(
+            self.lstm.parameters(), lr=self.learning_rate, weight_decay=1e-5
+        )
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=5
+        )
+
+        best_val, best_state, stale = float('inf'), None, 0
+        patience = 10
+
+        for _ in range(max(self.epochs, 80)):
+            self.lstm.train()
+            optimizer.zero_grad()
+            pred = self.lstm(X_tr)
+            loss = criterion(pred, y_tr)
+            loss.backward()
+            optimizer.step()
+
+            self.lstm.eval()
+            with torch.no_grad():
+                vp = self.lstm(X_va)
+                vl = criterion(vp, y_va).item()
+            scheduler.step(vl)
+
+            if vl < best_val - 1e-6:
+                best_val   = vl
+                best_state = {k: v.detach().clone() for k, v in self.lstm.state_dict().items()}
+                stale = 0
+            else:
+                stale += 1
+                if stale >= patience:
+                    break
+
+        if best_state is not None:
+            self.lstm.load_state_dict(best_state)
+        self.lstm.eval()
+
+    def _predict_lstm(self, X_seq):
+        with torch.no_grad():
+            p = self.lstm(torch.tensor(X_seq, dtype=torch.float32))
+        return p.cpu().numpy().flatten()
+
+    # ----------------- Full stacking fit -----------------
+    def fit(self, data):
+        """
+        1. Train LSTM, XGBoost, RF strictly on Train_A.
+        2. Generate their predictions on unseen Train_B.
+        3. Train Ridge meta-learner on Train_B's base predictions → y_B.
+        """
+        # Re-lock seeds immediately before training block for strict determinism.
+        torch.manual_seed(42)
+        np.random.seed(42)
+        _random.seed(42)
+
+        X_seq_A, X_flat_A, y_A = data['X_seq_A'], data['X_flat_A'], data['y_A']
+        X_seq_B, X_flat_B, y_B = data['X_seq_B'], data['X_flat_B'], data['y_B']
+        y_A_flat = y_A.flatten()
+        y_B_flat = y_B.flatten()
+
+        # Level 0 — train base learners on Train_A ONLY.
+        self._train_lstm(X_seq_A, y_A)
+        self.xgb_model.fit(X_flat_A, y_A_flat)
+        self.rf_model.fit(X_flat_A, y_A_flat)
+
+        # Level 1 features — predictions on unseen Train_B.
+        p_lstm_B = self._predict_lstm(X_seq_B)
+        p_xgb_B  = self.xgb_model.predict(X_flat_B)
+        p_rf_B   = self.rf_model.predict(X_flat_B)
+
+        # Track held-out MAE per base learner for diagnostics.
+        self.base_val_mae_ = {
+            'lstm': float(np.mean(np.abs(p_lstm_B - y_B_flat))),
+            'xgb':  float(np.mean(np.abs(p_xgb_B  - y_B_flat))),
+            'rf':   float(np.mean(np.abs(p_rf_B   - y_B_flat))),
+        }
+
+        meta_X = np.column_stack([p_lstm_B, p_xgb_B, p_rf_B])
+        self.meta.fit(meta_X, y_B_flat)
+        self.meta_coef_      = np.asarray(self.meta.coef_, dtype=float).tolist()
+        self.meta_intercept_ = float(self.meta.intercept_)
+        return self
+
+    # ----------------- Inference -----------------
+    def predict_log_return(self, X_seq, X_flat):
+        p_lstm = self._predict_lstm(X_seq)
+        p_xgb  = self.xgb_model.predict(X_flat)
+        p_rf   = self.rf_model.predict(X_flat)
+        meta_X = np.column_stack([p_lstm, p_xgb, p_rf])
+        return self.meta.predict(meta_X)
 
 
 # ---------------------------------------------------------------------------
@@ -449,39 +747,42 @@ class TrendPredictor:
         return TrendPredictor._historical_mean_projection(symbol, target_date=target_date)
 
     @staticmethod
-    def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=100, dropout=0.1, seq_len=20, target_date=None):
+    def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=100, dropout=0.3, seq_len=20, target_date=None):
         """
-        Trains an LSTM on recent data using given hyperparams and returns
-        the next-day predicted Close price (unscaled).
+        Heterogeneous stacked ensemble (Bi-LSTM + XGBoost + RandomForest ->
+        Ridge meta-learner) predicting next-day log return, inverse-transformed
+        back to an absolute price via  prev_close * exp(pred_log_ret).
         Returns None on any failure.
         """
         try:
-            from .evolution import get_train_val_data
-            result = get_train_val_data(symbol, seq_len=seq_len, target_date=target_date)
-            X_train, y_train, X_val, y_val, scaler, input_size = result
+            # Absolute determinism — unconditional at the start of training.
+            torch.manual_seed(42)
+            np.random.seed(42)
+            _random.seed(42)
 
-            model     = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, dropout=dropout)
-            criterion = nn.MSELoss()
-            optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+            data = _prepare_stacking_data(
+                symbol, seq_len=seq_len, target_date=target_date
+            )
+            if data is None:
+                return None
 
-            model.train()
-            for _ in range(epochs):
-                optimizer.zero_grad()
-                out  = model(X_train)
-                loss = criterion(out, y_train)
-                loss.backward()
-                optimizer.step()
+            forecaster = StackedEnsembleForecaster(
+                input_size=data['input_size'],
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                dropout=max(0.3, float(dropout)),
+                learning_rate=learning_rate,
+                epochs=epochs,
+                seq_len=seq_len,
+            )
+            forecaster.fit(data)
 
-            model.eval()
-            with torch.no_grad():
-                # Use the last validation sequence as input for next-day prediction
-                last_seq    = X_val[-1].unsqueeze(0)  # shape: (1, seq_len, input_size)
-                pred_scaled = model(last_seq).item()
+            pred_log_ret = float(forecaster.predict_log_return(
+                data['X_seq_infer'], data['X_flat_infer']
+            )[0])
+            pred_log_ret = float(np.clip(pred_log_ret, -0.15, 0.15))
 
-            # Inverse transform: only Close (column 0) was predicted
-            dummy       = np.zeros((1, input_size))
-            dummy[0, 0] = pred_scaled
-            pred_price  = scaler.inverse_transform(dummy)[0, 0]
+            pred_price = float(data['last_close']) * math.exp(pred_log_ret)
             return float(pred_price)
         except Exception:
             return None

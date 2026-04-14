@@ -21,6 +21,7 @@ if _FRONTEND_ROOT not in sys.path:
 
 from reporting_utils import resolve_report_universe
 from components.sidebar import render_backtest_sidebar
+from components.model_validation import render_model_validation_expander
 
 # Import quant_reporter
 try:
@@ -2563,4 +2564,9 @@ with tab_report:
 
             with st.expander("Legacy HTML Preview", expanded=False):
                 components.html(report_context["html_content"], height=800, scrolling=True)
+
+# Model Validation expander embedded at the bottom of the Portfolio page.
+_pf_last = st.session_state.get("last_tickers") or []
+_pf_default_symbol = _pf_last[0] if _pf_last else "AAPL"
+render_model_validation_expander(page_prefix="pf", default_symbol=_pf_default_symbol)
 

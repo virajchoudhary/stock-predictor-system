@@ -22,6 +22,7 @@ if _FRONTEND_ROOT not in sys.path:
 
 from components.black_scholes_ui import render_black_scholes_analyzer
 from components.sidebar import render_backtest_sidebar
+from components.model_validation import render_model_validation_expander
 
 API_URL = "http://127.0.0.1:8000/api"
 
@@ -198,6 +199,7 @@ with tab_mispricing:
             "SPY",
             help="US: SPY, AAPL, QQQ  |  India: NIFTY or NIFTY 50 (falls back to a simulated NSE chain when live options are unavailable)",
         )
+        st.session_state["_opt_last_symbol"] = symbol
         st.caption(
             "US options use yfinance live/delayed chains. "
             "NIFTY-style symbols fall back to a simulated chain when live options are unavailable."
@@ -662,3 +664,7 @@ with tab_surface:
                 "This is a parametric model surface (not live data). "
                 "Enter a US equity ticker with listed options (e.g. SPY, AAPL) to see real implied volatilities."
             )
+
+# Model Validation expander embedded at the bottom of the Options Analysis page.
+_opt_default_symbol = st.session_state.get("_opt_last_symbol") or "SPY"
+render_model_validation_expander(page_prefix="opt", default_symbol=_opt_default_symbol)
