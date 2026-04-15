@@ -16,10 +16,8 @@ _FRONTEND_ROOT = os.path.normpath(
 if _FRONTEND_ROOT not in sys.path:
     sys.path.insert(0, _FRONTEND_ROOT)
 
-from components.sidebar import render_backtest_sidebar
-
 st.set_page_config(page_title="Evolutionary HPO", layout="wide")
-target_date = render_backtest_sidebar()
+target_date = None
 
 st.title("Evolutionary HPO for Algorithmic Trading")
 st.markdown("Use a Genetic Algorithm to evolve the optimal 'brain' (LSTM Hyperparameters) for our **Market Trend Predictor**. Instead of guessing how the AI should be structured, we simulate thousands of trading scenarios acting on historical market data to find the hyperparameters that maximize our **Directional Trading Accuracy** (correctly predicting if a stock will go UP or DOWN).")

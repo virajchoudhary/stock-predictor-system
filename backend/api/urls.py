@@ -2,11 +2,14 @@ from django.urls import path
 from .views import (ChatView, TrendPredictionView, PortfolioOptimizationView,
                     HPOStatusView, BLOptimizationView, BlackLittermanAnalysisView,
                     SWOTAnalysisView, train_rl_agent, rl_progress,
-                    rl_hpo_cache_status, rl_hpo_cache_clear, stream_evolution)
+                    rl_hpo_cache_status, rl_hpo_cache_clear, stream_evolution,
+                    BacktestPredictionView, ClassicalBacktestView)
 
 urlpatterns = [
     path('chat/', ChatView.as_view(), name='chat'),
     path('predict/<str:symbol>/', TrendPredictionView.as_view(), name='predict_trend'),
+    path('backtest-predict/<str:symbol>/', BacktestPredictionView.as_view(), name='backtest_predict'),
+    path('backtest-classical/<str:symbol>/', ClassicalBacktestView.as_view(), name='backtest_classical'),
     path('optimize/', PortfolioOptimizationView.as_view(), name='optimize_portfolio'),
     path('hpo-status/', HPOStatusView.as_view(), name='hpo-status'),
     path('bl-optimize/', BLOptimizationView.as_view(), name='bl_optimize'),

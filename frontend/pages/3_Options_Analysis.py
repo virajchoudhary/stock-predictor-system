@@ -21,7 +21,6 @@ if _FRONTEND_ROOT not in sys.path:
     sys.path.insert(0, _FRONTEND_ROOT)
 
 from components.black_scholes_ui import render_black_scholes_analyzer
-from components.sidebar import render_backtest_sidebar
 
 API_URL = "http://127.0.0.1:8000/api"
 
@@ -48,7 +47,7 @@ st.set_page_config(
     page_title="Options Analysis - Stock Price Predictor",
     layout="wide",
 )
-target_date = render_backtest_sidebar()
+target_date = None
 
 st.title("Options Mispricing Detector (SABR Model)")
 
@@ -662,3 +661,140 @@ with tab_surface:
                 "This is a parametric model surface (not live data). "
                 "Enter a US equity ticker with listed options (e.g. SPY, AAPL) to see real implied volatilities."
             )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Model Validation — Validate Underlying Asset Predictions
+# ──────────────────────────────────────────────────────────────────────────────
+st.divider()
+with st.expander("Validate Underlying Asset Predictions", expanded=False):
+    st.markdown(
+        "Test the LSTM model's out-of-sample accuracy on the underlying asset. "
+        "The model is trained on data up to the selected past date and its predictions are compared "
+        "against the actual market path that followed."
+    )
+
+    # Pre-fill with the symbol currently being analysed in the SABR tab
+    opt_val_symbol = st.text_input("Symbol to Validate", symbol, key="opt_val_symbol")
+
+    opt_col_date, opt_col_cache, opt_col_btn = st.columns([2, 2, 1])
+    with opt_col_date:
+        opt_val_past_date = st.date_input(
+            "Select Past Date",
+            value=datetime.now() - timedelta(days=30),
+            max_value=datetime.now() - timedelta(days=7),
+            key="opt_val_past_date",
+        )
+    with opt_col_cache:
+        st.write("")
+        opt_force_retrain = st.checkbox(
+            "Force Retrain (Ignore Cache)",
+            value=False,
+            help="Deletes stored hyperparameters for this symbol and retrains from scratch using the current architecture defaults.",
+            key="opt_val_force_retrain",
+        )
+    with opt_col_btn:
+        st.write("")
+        st.write("")
+        opt_run_val = st.button("Run Validation", use_container_width=True, key="opt_val_run_btn")
+
+    if opt_run_val:
+        opt_spinner_msg = (
+            "Purging cache and retraining from scratch..."
+            if opt_force_retrain else
+            "Running LSTM validation slice..."
+        )
+        with st.spinner(opt_spinner_msg):
+            try:
+                opt_fr_param = "true" if opt_force_retrain else "false"
+                opt_resp = requests.get(
+                    f"{API_URL}/backtest-predict/{opt_val_symbol}/"
+                    f"?past_date={opt_val_past_date.strftime('%Y-%m-%d')}"
+                    f"&force_retrain={opt_fr_param}"
+                )
+                if opt_resp.status_code == 200:
+                    opt_data = opt_resp.json()
+                    if "error" in opt_data:
+                        st.error(opt_data["error"])
+                    else:
+                        opt_hist    = opt_data["historical"]
+                        opt_test    = opt_data["test"]
+                        opt_metrics = opt_data["metrics"]
+
+                        opt_hist_dates  = pd.to_datetime(opt_hist["dates"])
+                        opt_hist_prices = opt_hist["prices"]
+                        opt_test_dates  = pd.to_datetime(opt_test["dates"])
+                        opt_actual      = opt_test["actual"]
+                        opt_pred        = opt_test["predicted"]
+
+                        if len(opt_hist_dates) > 0 and len(opt_test_dates) > 0:
+                            _anchor_d = opt_hist_dates[-1]
+                            _anchor_p = opt_hist_prices[-1]
+                            opt_act_dates   = [_anchor_d] + list(opt_test_dates)
+                            opt_act_prices  = [_anchor_p] + opt_actual
+                            opt_pred_dates  = [_anchor_d] + list(opt_test_dates)
+                            opt_pred_prices = [_anchor_p] + opt_pred
+                        else:
+                            opt_act_dates   = list(opt_test_dates)
+                            opt_act_prices  = opt_actual
+                            opt_pred_dates  = list(opt_test_dates)
+                            opt_pred_prices = opt_pred
+
+                        opt_fig = go.Figure()
+                        opt_fig.add_trace(go.Scatter(
+                            x=opt_hist_dates, y=opt_hist_prices,
+                            mode="lines", name="Historical",
+                            line=dict(color="#7A9BB5", dash="solid", width=2),
+                        ))
+                        opt_fig.add_trace(go.Scatter(
+                            x=opt_act_dates, y=opt_act_prices,
+                            mode="lines", name="Actual Market Path",
+                            line=dict(color="#00FF94", dash="solid", width=2),
+                        ))
+                        opt_fig.add_trace(go.Scatter(
+                            x=opt_pred_dates, y=opt_pred_prices,
+                            mode="lines", name="LSTM Prediction",
+                            line=dict(color="#FFB800", dash="dash", width=2),
+                        ))
+                        opt_fig.update_layout(
+                            paper_bgcolor="#080C10", plot_bgcolor="#080C10",
+                            font=dict(family="IBM Plex Mono", color="#7A9BB5", size=10),
+                            xaxis=dict(gridcolor="#1E2D3D", rangeslider_visible=True),
+                            yaxis=dict(gridcolor="#1E2D3D", title="Price"),
+                            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+                            margin=dict(l=0, r=0, t=30, b=0),
+                            height=450,
+                        )
+                        st.plotly_chart(opt_fig, use_container_width=True)
+
+                        opt_m1, opt_m2, opt_m3, opt_m4 = st.columns(4)
+                        opt_m1.metric("RMSE (Root Mean Square Error)", f"{opt_metrics['rmse']:.2f}")
+                        opt_m2.metric("MAE (Mean Absolute Error)", f"{opt_metrics['mae']:.2f}")
+                        opt_dir_acc   = opt_metrics["directional_accuracy"]
+                        opt_dir_color = "normal" if opt_dir_acc >= 50 else "inverse"
+                        opt_m3.metric(
+                            "Directional Accuracy", f"{opt_dir_acc:.1f}%",
+                            delta="Profitable Edge" if opt_dir_acc >= 50 else "Random Walk",
+                            delta_color=opt_dir_color,
+                        )
+                        opt_err       = opt_metrics.get("expected_realized_return", 0.0)
+                        opt_err_color = "#00FF94" if opt_err >= 0 else "#FF4466"
+                        opt_err_sign  = "+" if opt_err >= 0 else ""
+                        opt_m4.markdown(
+                            f"""<div style="background:#0A0E14;border:1px solid #1E2D3D;
+                            border-top:2px solid {opt_err_color};padding:1rem 1.25rem;border-radius:3px;">
+                                <div style="font-family:'IBM Plex Mono',monospace;font-size:0.58rem;
+                                letter-spacing:0.12em;text-transform:uppercase;color:#7A9BB5;margin-bottom:0.3rem;">
+                                Expected Realized Return (Net)</div>
+                                <div style="font-family:'IBM Plex Mono',monospace;font-size:1.4rem;
+                                color:{opt_err_color};font-weight:600;">{opt_err_sign}{opt_err:.2f}%</div>
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+                        st.caption(
+                            "Metrics account for T+1 Open execution, 0.1% commissions, "
+                            "and 0.05% slippage for real-world accuracy."
+                        )
+                else:
+                    st.error(f"Validation failed (Status: {opt_resp.status_code})")
+            except Exception as e:
+                st.error(f"API Error: {e}")

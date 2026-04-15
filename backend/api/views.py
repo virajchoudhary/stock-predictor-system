@@ -5,6 +5,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.decorators import api_view
 from .ai_services import GroqService, TrendPredictor, PortfolioOptimizer, RLPortfolioAgent
+from .classical_models import ClassicalForecaster
 from django.http import StreamingHttpResponse
 
 _rl_agent = RLPortfolioAgent()
@@ -63,6 +64,7 @@ class TrendPredictionView(APIView):
 class PortfolioOptimizationView(APIView):
     def post(self, request):
         tickers = request.data.get('tickers', [])
+        print(f"PortfolioOptimizationView called with tickers: {tickers}")
         risk_tolerance = request.data.get('risk_tolerance', 0.5)
         target_date = request.data.get('target_date')
         
@@ -329,3 +331,48 @@ def stream_evolution(request):
         ),
         content_type='application/x-ndjson'
     )
+
+class BacktestPredictionView(APIView):
+    def get(self, request, symbol):
+        past_date = request.query_params.get('past_date')
+        if not past_date:
+            return Response({'error': 'past_date query parameter is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        force_retrain_raw = request.query_params.get('force_retrain', 'false')
+        force_retrain = force_retrain_raw.strip().lower() in ('true', '1', 'yes')
+
+        result = TrendPredictor.run_backtest(symbol, past_date, force_retrain=force_retrain)
+        if isinstance(result, dict) and "error" in result:
+            return Response(result, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(result)
+
+
+class ClassicalBacktestView(APIView):
+    """
+    GET /api/backtest-classical/<symbol>/
+    Query params:
+      past_date (required, YYYY-MM-DD)
+
+    Runs ARIMA + GARCH backtesting strictly on data before past_date,
+    evaluates on data after. Returns results in the same base shape as
+    BacktestPredictionView plus confidence interval arrays.
+    """
+    def get(self, request, symbol):
+        symbol = symbol.upper()
+        past_date = request.query_params.get("past_date")
+
+        if not past_date:
+            return Response(
+                {"error": "past_date is required (YYYY-MM-DD)"},
+                status=400
+            )
+
+        try:
+            forecaster = ClassicalForecaster(symbol=symbol, past_date=past_date)
+            result = forecaster.run_classical_backtest()
+            return Response(result)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=400)
+        except Exception as e:
+            return Response({"error": f"Classical backtest failed: {str(e)}"}, status=500)

@@ -45,12 +45,17 @@ def get_train_val_data(symbol="AAPL", seq_len=20, target_date=None):
 
     scaler      = MinMaxScaler(feature_range=(0, 1))
     data_scaled = scaler.fit_transform(df.values)
-    input_size  = data_scaled.shape[1]  # 6
+    input_size  = data_scaled.shape[1]  # 7
+
+    # Log returns on raw Close — aligned with production LSTM objective in ai_services.py
+    close_prices = df['Close'].values
+    log_returns = np.log(close_prices[1:] / close_prices[:-1])
 
     X, y = [], []
     for i in range(len(data_scaled) - seq_len):
         X.append(data_scaled[i:i + seq_len])
-        y.append(data_scaled[i + seq_len, 0])  # predict Close only
+        # Target = log return from step (i+seq_len-1) to (i+seq_len)
+        y.append(log_returns[i + seq_len - 1])
 
     X = np.array(X)
     y = np.array(y).reshape(-1, 1)
@@ -99,14 +104,9 @@ def evaluate_chromosome(chromosome, symbol, input_size=None, target_date=None):
         val_loss = criterion(val_outputs, y_val)
 
         # Directional Accuracy — did the model predict the correct price direction?
-        # X_val shape is (batch, seq_len, input_size); column 0 is Close
-        prev_prices = X_val[:, -1, 0]  # the last known Close before prediction
-
-        actual_deltas    = y_val.squeeze() - prev_prices
-        predicted_deltas = val_outputs.squeeze() - prev_prices
-
-        actual_signs    = torch.sign(actual_deltas)
-        predicted_signs = torch.sign(predicted_deltas)
+        # y values are log returns, so their sign directly encodes direction.
+        actual_signs    = torch.sign(y_val.squeeze())
+        predicted_signs = torch.sign(val_outputs.squeeze())
 
         correct  = (actual_signs == predicted_signs).sum().item()
         total    = len(actual_signs)

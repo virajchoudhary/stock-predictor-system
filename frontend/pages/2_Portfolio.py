@@ -20,7 +20,6 @@ if _FRONTEND_ROOT not in sys.path:
     sys.path.insert(0, _FRONTEND_ROOT)
 
 from reporting_utils import resolve_report_universe
-from components.sidebar import render_backtest_sidebar
 
 # Import quant_reporter
 try:
@@ -102,7 +101,7 @@ except Exception:
 API_URL = "http://127.0.0.1:8000/api"
 
 st.set_page_config(page_title="Portfolio - Stock Price Predictor", layout="wide")
-target_date = render_backtest_sidebar()
+target_date = None
 
 st.title("Portfolio Manager")
 
@@ -2531,4 +2530,142 @@ with tab_report:
 
             with st.expander("Legacy HTML Preview", expanded=False):
                 components.html(report_context["html_content"], height=800, scrolling=True)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Model Validation — Validate Underlying Asset Predictions
+# ──────────────────────────────────────────────────────────────────────────────
+st.divider()
+with st.expander("Validate Underlying Asset Predictions", expanded=False):
+    st.markdown(
+        "Test the LSTM model's out-of-sample accuracy on any individual ticker from your portfolio. "
+        "The model is trained on data up to the selected past date and its predictions are compared "
+        "against the actual market path that followed."
+    )
+
+    # Default to the first ticker currently entered in the allocator
+    _pf_default_sym = tickers_input.split(",")[0].strip() if tickers_input.strip() else "AAPL"
+    pf_val_symbol = st.text_input("Symbol to Validate", _pf_default_sym, key="pf_val_symbol")
+
+    pf_col_date, pf_col_cache, pf_col_btn = st.columns([2, 2, 1])
+    with pf_col_date:
+        pf_val_past_date = st.date_input(
+            "Select Past Date",
+            value=datetime.now() - timedelta(days=30),
+            max_value=datetime.now() - timedelta(days=7),
+            key="pf_val_past_date",
+        )
+    with pf_col_cache:
+        st.write("")
+        pf_force_retrain = st.checkbox(
+            "Force Retrain (Ignore Cache)",
+            value=False,
+            help="Deletes stored hyperparameters for this symbol and retrains from scratch using the current architecture defaults.",
+            key="pf_val_force_retrain",
+        )
+    with pf_col_btn:
+        st.write("")
+        st.write("")
+        pf_run_val = st.button("Run Validation", use_container_width=True, key="pf_val_run_btn")
+
+    if pf_run_val:
+        pf_spinner_msg = (
+            "Purging cache and retraining from scratch..."
+            if pf_force_retrain else
+            "Running LSTM validation slice..."
+        )
+        with st.spinner(pf_spinner_msg):
+            try:
+                pf_fr_param = "true" if pf_force_retrain else "false"
+                pf_resp = requests.get(
+                    f"{API_URL}/backtest-predict/{pf_val_symbol}/"
+                    f"?past_date={pf_val_past_date.strftime('%Y-%m-%d')}"
+                    f"&force_retrain={pf_fr_param}"
+                )
+                if pf_resp.status_code == 200:
+                    pf_data = pf_resp.json()
+                    if "error" in pf_data:
+                        st.error(pf_data["error"])
+                    else:
+                        pf_hist    = pf_data["historical"]
+                        pf_test    = pf_data["test"]
+                        pf_metrics = pf_data["metrics"]
+
+                        pf_hist_dates  = pd.to_datetime(pf_hist["dates"])
+                        pf_hist_prices = pf_hist["prices"]
+                        pf_test_dates  = pd.to_datetime(pf_test["dates"])
+                        pf_actual      = pf_test["actual"]
+                        pf_pred        = pf_test["predicted"]
+
+                        if len(pf_hist_dates) > 0 and len(pf_test_dates) > 0:
+                            _anchor_d = pf_hist_dates[-1]
+                            _anchor_p = pf_hist_prices[-1]
+                            pf_act_dates  = [_anchor_d] + list(pf_test_dates)
+                            pf_act_prices = [_anchor_p] + pf_actual
+                            pf_pred_dates  = [_anchor_d] + list(pf_test_dates)
+                            pf_pred_prices = [_anchor_p] + pf_pred
+                        else:
+                            pf_act_dates   = list(pf_test_dates)
+                            pf_act_prices  = pf_actual
+                            pf_pred_dates  = list(pf_test_dates)
+                            pf_pred_prices = pf_pred
+
+                        pf_fig = go.Figure()
+                        pf_fig.add_trace(go.Scatter(
+                            x=pf_hist_dates, y=pf_hist_prices,
+                            mode="lines", name="Historical",
+                            line=dict(color="#7A9BB5", dash="solid", width=2),
+                        ))
+                        pf_fig.add_trace(go.Scatter(
+                            x=pf_act_dates, y=pf_act_prices,
+                            mode="lines", name="Actual Market Path",
+                            line=dict(color="#00FF94", dash="solid", width=2),
+                        ))
+                        pf_fig.add_trace(go.Scatter(
+                            x=pf_pred_dates, y=pf_pred_prices,
+                            mode="lines", name="LSTM Prediction",
+                            line=dict(color="#FFB800", dash="dash", width=2),
+                        ))
+                        pf_fig.update_layout(
+                            paper_bgcolor="#080C10", plot_bgcolor="#080C10",
+                            font=dict(family="IBM Plex Mono", color="#7A9BB5", size=10),
+                            xaxis=dict(gridcolor="#1E2D3D", rangeslider_visible=True),
+                            yaxis=dict(gridcolor="#1E2D3D", title="Price"),
+                            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
+                            margin=dict(l=0, r=0, t=30, b=0),
+                            height=450,
+                        )
+                        st.plotly_chart(pf_fig, use_container_width=True)
+
+                        pf_m1, pf_m2, pf_m3, pf_m4 = st.columns(4)
+                        pf_m1.metric("RMSE (Root Mean Square Error)", f"{pf_metrics['rmse']:.2f}")
+                        pf_m2.metric("MAE (Mean Absolute Error)", f"{pf_metrics['mae']:.2f}")
+                        pf_dir_acc   = pf_metrics["directional_accuracy"]
+                        pf_dir_color = "normal" if pf_dir_acc >= 50 else "inverse"
+                        pf_m3.metric(
+                            "Directional Accuracy", f"{pf_dir_acc:.1f}%",
+                            delta="Profitable Edge" if pf_dir_acc >= 50 else "Random Walk",
+                            delta_color=pf_dir_color,
+                        )
+                        pf_err       = pf_metrics.get("expected_realized_return", 0.0)
+                        pf_err_color = "#00FF94" if pf_err >= 0 else "#FF4466"
+                        pf_err_sign  = "+" if pf_err >= 0 else ""
+                        pf_m4.markdown(
+                            f"""<div style="background:#0A0E14;border:1px solid #1E2D3D;
+                            border-top:2px solid {pf_err_color};padding:1rem 1.25rem;border-radius:3px;">
+                                <div style="font-family:'IBM Plex Mono',monospace;font-size:0.58rem;
+                                letter-spacing:0.12em;text-transform:uppercase;color:#7A9BB5;margin-bottom:0.3rem;">
+                                Expected Realized Return (Net)</div>
+                                <div style="font-family:'IBM Plex Mono',monospace;font-size:1.4rem;
+                                color:{pf_err_color};font-weight:600;">{pf_err_sign}{pf_err:.2f}%</div>
+                            </div>""",
+                            unsafe_allow_html=True,
+                        )
+                        st.caption(
+                            "Metrics account for T+1 Open execution, 0.1% commissions, "
+                            "and 0.05% slippage for real-world accuracy."
+                        )
+                else:
+                    st.error(f"Validation failed (Status: {pf_resp.status_code})")
+            except Exception as e:
+                st.error(f"API Error: {e}")
 

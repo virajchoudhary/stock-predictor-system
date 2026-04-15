@@ -42,19 +42,34 @@ polygon_client  = RESTClient(api_key=polygon_api_key) if polygon_api_key else No
 class LSTMModel(nn.Module):
     def __init__(self, input_size=1, hidden_size=64, num_layers=2, dropout=0.2):
         super(LSTMModel, self).__init__()
-        # Use Bidirectional LSTM for better feature extraction from market sequences
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, 
-                            batch_first=True, 
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
+                            batch_first=True,
                             dropout=dropout if num_layers > 1 else 0.0,
                             bidirectional=True)
-        self.dropout = nn.Dropout(dropout)
-        # Output is hidden_size * 2 due to bidirectional
+        # LayerNorm over the concatenated forward+backward hidden states
+        self.layer_norm = nn.LayerNorm(hidden_size * 2)
+        # Fixed 0.2 output dropout for regularisation (independent of LSTM inter-layer dropout)
+        self.dropout = nn.Dropout(0.2)
         self.fc = nn.Linear(hidden_size * 2, 1)
 
     def forward(self, x):
-        out, _ = self.lstm(x)
-        # Take the last hidden state of both directions
-        return self.fc(self.dropout(out[:, -1, :]))
+        lstm_out, _ = self.lstm(x)
+        last_hidden  = self.layer_norm(lstm_out[:, -1, :])
+        return self.fc(self.dropout(last_hidden))
+
+
+def _directional_penalty_loss(pred: torch.Tensor, target: torch.Tensor,
+                               penalty_weight: float = 0.5) -> torch.Tensor:
+    """
+    Loss = MSE(pred, target)  +  penalty_weight * fraction_of_directional_mistakes.
+    Works on log-return tensors: same sign → agreement, opposite sign → penalised.
+    """
+    mse = torch.mean((pred - target) ** 2)
+    # sign(pred)*sign(target): +1 = directions agree, -1 = disagree
+    sign_agreement = torch.sign(pred) * torch.sign(target)
+    # clamp so only disagreements (negative values) contribute to penalty
+    penalty = torch.mean(torch.clamp(-sign_agreement, min=0.0))
+    return mse + penalty_weight * penalty
 
 
 # ---------------------------------------------------------------------------
@@ -451,38 +466,130 @@ class TrendPredictor:
     @staticmethod
     def _lstm_predict(symbol, hidden_size=64, num_layers=2, learning_rate=0.001, epochs=100, dropout=0.1, seq_len=20, target_date=None):
         """
-        Trains an LSTM on recent data using given hyperparams and returns
-        the next-day predicted Close price (unscaled).
-        Returns None on any failure.
+        Trains a Bidirectional LSTM to predict weekly log returns, with:
+          - Stationary log-return target (eliminates price-level non-stationarity)
+          - Early stopping on a held-out 10 % validation slice (patience=10)
+          - ReduceLROnPlateau scheduler (patience=5, factor=0.5)
+          - Directional penalty loss
+        Returns the next-period predicted price as an absolute float, or None on failure.
         """
         try:
-            from .evolution import get_train_val_data
-            result = get_train_val_data(symbol, seq_len=seq_len, target_date=target_date)
-            X_train, y_train, X_val, y_val, scaler, input_size = result
+            import ta
 
-            model     = LSTMModel(input_size=input_size, hidden_size=hidden_size, num_layers=num_layers, dropout=dropout)
-            criterion = nn.MSELoss()
+            df = get_price_history(symbol, period="2y", target_date=target_date)
+            if df is None or getattr(df, 'empty', True):
+                return None
+
+            df = df.resample('W').agg({
+                'Open': 'first', 'High': 'max', 'Low': 'min',
+                'Close': 'last', 'Volume': 'sum'
+            }).dropna()
+
+            close = df['Close']
+            high  = df['High']
+            low   = df['Low']
+
+            df['rsi']       = ta.momentum.RSIIndicator(close=close, window=14).rsi()
+            df['macd_diff'] = ta.trend.MACD(close=close).macd_diff()
+            df['bb_width']  = (
+                ta.volatility.BollingerBands(close=close, window=20).bollinger_hband() -
+                ta.volatility.BollingerBands(close=close, window=20).bollinger_lband()
+            )
+            df['atr']       = ta.volatility.AverageTrueRange(
+                high=high, low=low, close=close, window=14
+            ).average_true_range()
+            sma20           = ta.trend.SMAIndicator(close=close, window=20).sma_indicator()
+            df['sma_dist']  = (close - sma20) / sma20
+            df['obv']       = ta.volume.OnBalanceVolumeIndicator(
+                close=df['Close'], volume=df['Volume']
+            ).on_balance_volume()
+
+            feature_cols = ['Close', 'rsi', 'macd_diff', 'bb_width', 'atr', 'sma_dist', 'obv']
+            df = df[feature_cols].dropna()
+            if len(df) < seq_len + 10:
+                return None
+
+            # Stationary target: log returns of Close
+            log_returns = np.log(df['Close'] / df['Close'].shift(1)).fillna(0).values
+
+            scaler      = MinMaxScaler(feature_range=(0, 1))
+            data_scaled = scaler.fit_transform(df.values)
+            input_size  = data_scaled.shape[1]
+
+            X, y = [], []
+            for i in range(len(data_scaled) - seq_len):
+                X.append(data_scaled[i:i + seq_len])
+                y.append(log_returns[i + seq_len])
+
+            if not X:
+                return None
+
+            X = np.array(X)
+            y = np.array(y).reshape(-1, 1)
+
+            train_size = int(len(X) * 0.8)
+            val_split  = max(1, int(train_size * 0.1))  # last 10 % of train for early stopping
+
+            X_train_t    = torch.tensor(X[:train_size], dtype=torch.float32)
+            y_train_t    = torch.tensor(y[:train_size], dtype=torch.float32)
+            X_train_core = X_train_t[:-val_split]
+            y_train_core = y_train_t[:-val_split]
+            X_val_es     = X_train_t[-val_split:]
+            y_val_es     = y_train_t[-val_split:]
+
+            model     = LSTMModel(input_size=input_size, hidden_size=hidden_size,
+                                  num_layers=num_layers, dropout=dropout)
             optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', patience=5, factor=0.5
+            )
 
-            model.train()
+            best_val_loss    = float('inf')
+            patience_counter = 0
+            best_state       = None
+            PATIENCE         = 10
+
             for _ in range(epochs):
+                model.train()
                 optimizer.zero_grad()
-                out  = model(X_train)
-                loss = criterion(out, y_train)
+                out  = model(X_train_core)
+                loss = _directional_penalty_loss(out, y_train_core)
                 loss.backward()
                 optimizer.step()
 
+                model.eval()
+                with torch.no_grad():
+                    val_out  = model(X_val_es)
+                    val_loss = torch.mean((val_out - y_val_es) ** 2).item()
+
+                scheduler.step(val_loss)
+
+                if val_loss < best_val_loss:
+                    best_val_loss    = val_loss
+                    best_state       = {k: v.clone() for k, v in model.state_dict().items()}
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= PATIENCE:
+                        break
+
+            if best_state:
+                model.load_state_dict(best_state)
+
+            # Predict next period's log return from the most recent full window
             model.eval()
             with torch.no_grad():
-                # Use the last validation sequence as input for next-day prediction
-                last_seq    = X_val[-1].unsqueeze(0)  # shape: (1, seq_len, input_size)
-                pred_scaled = model(last_seq).item()
+                next_seq     = torch.tensor(
+                    data_scaled[-seq_len:].reshape(1, seq_len, input_size),
+                    dtype=torch.float32
+                )
+                pred_log_ret = model(next_seq).item()
 
-            # Inverse transform: only Close (column 0) was predicted
-            dummy       = np.zeros((1, input_size))
-            dummy[0, 0] = pred_scaled
-            pred_price  = scaler.inverse_transform(dummy)[0, 0]
-            return float(pred_price)
+            # Reconstruct absolute price: last known Close × exp(predicted log return)
+            last_close = float(df['Close'].iloc[-1])
+            pred_price = last_close * float(np.exp(pred_log_ret))
+            return pred_price if np.isfinite(pred_price) and pred_price > 0 else None
+
         except Exception:
             return None
 
@@ -758,6 +865,319 @@ class TrendPredictor:
         except Exception as e:
             return {"error": str(e)}
 
+    @classmethod
+    def run_backtest(cls, symbol, past_date_str, force_retrain=False):
+        from .models import OptimizedHyperparams
+        import ta
+        from datetime import datetime
+
+        df = get_price_history(symbol, period="5y")
+        if df is None or getattr(df, 'empty', True):
+            return {"error": f"Not enough data for {symbol}"}
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        # Resample logic matches Model Evolution logic natively
+        df = df.resample('W').agg({
+            'Open':   'first',
+            'High':   'max',
+            'Low':    'min',
+            'Close':  'last',
+            'Volume': 'sum'
+        }).dropna()
+        
+        close = df['Close']
+        high  = df['High']
+        low   = df['Low']
+        
+        df['rsi']        = ta.momentum.RSIIndicator(close=close, window=14).rsi()
+        df['macd_diff']  = ta.trend.MACD(close=close).macd_diff()
+        df['bb_width']   = (
+            ta.volatility.BollingerBands(close=close, window=20).bollinger_hband() -
+            ta.volatility.BollingerBands(close=close, window=20).bollinger_lband()
+        )
+        df['atr']        = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
+        sma20            = ta.trend.SMAIndicator(close=close, window=20).sma_indicator()
+        df['sma_dist']   = (close - sma20) / sma20
+        df['obv'] = ta.volume.OnBalanceVolumeIndicator(
+            close=df['Close'], volume=df['Volume']
+        ).on_balance_volume()
+
+        # Save Open prices before dropping to feature columns (needed for T+1 execution)
+        open_series = df['Open'].copy()
+
+        feature_cols = ['Close', 'rsi', 'macd_diff', 'bb_width', 'atr', 'sma_dist', 'obv']
+        df = df[feature_cols].dropna()
+
+        # Align open_series to the clean df index (after indicator-driven dropna)
+        open_series = open_series.reindex(df.index)
+        
+        past_date = pd.to_datetime(past_date_str)
+        if past_date.tzinfo is None and df.index.tzinfo is not None:
+            past_date = past_date.tz_localize(df.index.tzinfo)
+            
+        if force_retrain:
+            # Purge stale cache so future standard predictions also use fresh weights
+            try:
+                OptimizedHyperparams.objects.filter(symbol=symbol.upper()).delete()
+            except Exception:
+                pass
+            cached = None
+        else:
+            cached = OptimizedHyperparams.get_valid_cache(symbol)
+
+        seq_len     = cached.seq_len        if cached else 20
+        hidden_size = cached.hidden_size    if cached else 64
+        num_layers  = cached.num_layers     if cached else 2
+        lr          = cached.learning_rate  if cached else 0.001
+        epochs      = cached.epochs         if cached else 50   # bump default for fresh runs
+        dropout     = cached.dropout        if cached else 0.2  # match new architecture default
+        
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        data_scaled = scaler.fit_transform(df.values)
+        input_size  = data_scaled.shape[1]
+
+        # Stationary target: log returns of Close (eliminates price-level non-stationarity)
+        log_returns = np.log(df['Close'] / df['Close'].shift(1)).fillna(0).values
+
+        X, y, target_dates = [], [], []
+        for i in range(len(data_scaled) - seq_len):
+            X.append(data_scaled[i:i + seq_len])
+            y.append(log_returns[i + seq_len])   # log return, not scaled price
+            target_dates.append(df.index[i + seq_len])
+            
+        if not X:
+            return {"error": "Not enough data after applying sequence length."}
+            
+        X = np.array(X)
+        y = np.array(y).reshape(-1, 1)
+        
+        # Split Train/Test
+        train_idx = [i for i, d in enumerate(target_dates) if d <= past_date]
+        test_idx = [i for i, d in enumerate(target_dates) if d > past_date]
+        
+        if len(train_idx) < 10:
+            return {"error": "Past date is too early. Not enough training data."}
+        if not test_idx:
+            return {"error": "Past date is too recent. No test data available."}
+            
+        X_train, y_train = X[train_idx], y[train_idx]
+        X_test, y_test = X[test_idx], y[test_idx]
+        
+        # Deterministic seed — must run unconditionally so every backtest run is
+        # perfectly reproducible regardless of the force_retrain flag.
+        import random as _random
+        torch.manual_seed(42)
+        np.random.seed(42)
+        _random.seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
+
+        # Train — with early stopping, ReduceLROnPlateau, and directional penalty loss
+        model     = LSTMModel(input_size=input_size, hidden_size=hidden_size,
+                              num_layers=num_layers, dropout=dropout)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', patience=5, factor=0.5
+        )
+
+        X_train_t = torch.tensor(X_train, dtype=torch.float32)
+        y_train_t = torch.tensor(y_train, dtype=torch.float32)
+
+        # Carve last 10 % of train slice as the early-stopping validation set
+        val_split    = max(1, int(len(X_train_t) * 0.1))
+        X_tr_core    = X_train_t[:-val_split]
+        y_tr_core    = y_train_t[:-val_split]
+        X_val_es     = X_train_t[-val_split:]
+        y_val_es     = y_train_t[-val_split:]
+
+        best_val_loss    = float('inf')
+        patience_counter = 0
+        best_state       = None
+        PATIENCE         = 10
+
+        for _ in range(epochs):
+            model.train()
+            optimizer.zero_grad()
+            out  = model(X_tr_core)
+            loss = _directional_penalty_loss(out, y_tr_core)
+            loss.backward()
+            optimizer.step()
+
+            model.eval()
+            with torch.no_grad():
+                val_out  = model(X_val_es)
+                val_loss = torch.mean((val_out - y_val_es) ** 2).item()
+
+            scheduler.step(val_loss)
+
+            if val_loss < best_val_loss:
+                best_val_loss    = val_loss
+                best_state       = {k: v.clone() for k, v in model.state_dict().items()}
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= PATIENCE:
+                    break
+
+        if best_state:
+            model.load_state_dict(best_state)
+
+        # Predict log returns on test sequences
+        model.eval()
+        with torch.no_grad():
+            X_test_t     = torch.tensor(X_test, dtype=torch.float32)
+            pred_log_rets = model(X_test_t).numpy().flatten()
+
+        # Previous close prices (last scaled Close in each input window → unscaled)
+        # These are needed to reconstruct absolute prices from log returns.
+        prev_scaled_raw = X_test[:, -1, 0]
+        dummy_prev      = np.zeros((len(prev_scaled_raw), input_size))
+        dummy_prev[:, 0] = prev_scaled_raw
+        prevs = scaler.inverse_transform(dummy_prev)[:, 0]
+
+        # Reconstruct absolute prices: price(T) = price(T-1) × exp(log_return(T))
+        y_test_flat = y_test.flatten()
+        actuals = prevs * np.exp(y_test_flat)   # actual close prices
+        preds   = prevs * np.exp(pred_log_rets) # predicted close prices
+        
+        # Trading Friction constants
+        TRANSACTION_FEE = 0.001   # 0.1% commission per trade
+        SLIPPAGE        = 0.0005  # 0.05% slippage per trade
+
+        from sklearn.metrics import mean_squared_error, mean_absolute_error
+
+        # prevs already computed above via log-return price reconstruction
+        predicted_deltas = preds - prevs
+        predicted_signs  = np.sign(predicted_deltas)
+
+        # T+1 Open Execution: build execution prices for each test step
+        execution_opens = []
+        for enum_k, i in enumerate(test_idx):
+            date_i = target_dates[i]
+            loc = df.index.get_loc(date_i)
+            if loc + 1 < len(df.index):
+                execution_opens.append(float(open_series.iloc[loc + 1]))
+            else:
+                execution_opens.append(float(actuals[enum_k]))  # fallback: last close
+        execution_opens = np.array(execution_opens)
+
+        # Error metrics measured against T+1 execution prices (not same-day close)
+        rmse = float(np.sqrt(mean_squared_error(execution_opens, preds)))
+        mae  = float(mean_absolute_error(execution_opens, preds))
+
+        # Directional accuracy: did predicted direction match T+1 open vs prev close?
+        actual_deltas_exec = execution_opens - prevs
+        actual_signs_exec  = np.sign(actual_deltas_exec)
+        correct_exec = np.sum(actual_signs_exec == predicted_signs)
+        dir_acc = (correct_exec / len(actual_signs_exec)) * 100 if len(actual_signs_exec) > 0 else 0.0
+
+        # Expected Realized Return (Net of Fees)
+        # Strategy: at each step follow model signal, enter at Open(T+1), exit at Open(T+2)
+        net_return = 0.0
+        num_trades = 0
+        for k in range(len(execution_opens) - 1):
+            signal = predicted_signs[k]
+            if signal == 0:
+                continue
+            entry      = execution_opens[k]
+            exit_price = execution_opens[k + 1]
+            if entry <= 0:
+                continue
+            raw_pct     = signal * (exit_price - entry) / entry
+            net_return += raw_pct - TRANSACTION_FEE - SLIPPAGE
+            num_trades += 1
+        expected_realized_return = float(net_return * 100) if num_trades > 0 else 0.0
+
+        # Extract Historical context
+        hist_df = df[df.index <= past_date]['Close']
+        if hist_df.empty:
+            hist_dates = []
+            hist_prices = []
+        else:
+            hist_dates = [d.strftime('%Y-%m-%d') for d in hist_df.index]
+            hist_prices = hist_df.tolist()
+
+        test_dates_str = [target_dates[i].strftime('%Y-%m-%d') for i in test_idx]
+
+        # Per-row trade log
+        trade_log = []
+        for k in range(len(test_idx)):
+            trade_log.append({
+                "date":              test_dates_str[k],
+                "predicted_price":   round(float(preds[k]), 2),
+                "actual_price":      round(float(actuals[k]), 2),
+                "error_abs":         round(float(abs(preds[k] - actuals[k])), 2),
+                "error_pct":         round(float(abs(preds[k] - actuals[k]) / actuals[k] * 100), 2),
+                "direction_correct": bool(predicted_signs[k] == actual_signs_exec[k]),
+            })
+
+        # Win rate
+        win_rate = float(
+            sum(1 for r in trade_log if r["direction_correct"]) / len(trade_log) * 100
+        ) if trade_log else 0.0
+
+        # Equity curves (normalized to 100 at start)
+        lstm_equity = [100.0]
+        buyhold_equity = [100.0]
+        for k in range(len(execution_opens) - 1):
+            signal = predicted_signs[k]
+            entry  = execution_opens[k]
+            exit_p = execution_opens[k + 1]
+            if entry > 0 and signal != 0:
+                raw_ret = signal * (exit_p - entry) / entry
+                net_ret = raw_ret - TRANSACTION_FEE - SLIPPAGE
+            else:
+                net_ret = 0.0
+            lstm_equity.append(lstm_equity[-1] * (1 + net_ret))
+
+            bh_ret = (exit_p - entry) / entry if entry > 0 else 0.0
+            buyhold_equity.append(buyhold_equity[-1] * (1 + bh_ret))
+
+        equity_dates = test_dates_str[:len(lstm_equity)]
+
+        # Sharpe (annualized, weekly data → sqrt(52))
+        lstm_returns = np.diff(lstm_equity) / np.array(lstm_equity[:-1])
+        if len(lstm_returns) > 1 and lstm_returns.std() > 0:
+            sharpe = float((lstm_returns.mean() / lstm_returns.std()) * np.sqrt(52))
+        else:
+            sharpe = 0.0
+
+        # Max drawdown
+        peak = lstm_equity[0]
+        max_dd = 0.0
+        for val in lstm_equity:
+            if val > peak:
+                peak = val
+            dd = (peak - val) / peak
+            if dd > max_dd:
+                max_dd = dd
+        max_drawdown = float(max_dd * 100)
+
+        return {
+            "historical": {"dates": hist_dates, "prices": hist_prices},
+            "test": {
+                "dates": test_dates_str,
+                "actual": actuals.tolist(),
+                "predicted": preds.tolist()
+            },
+            "metrics": {
+                "rmse": rmse,
+                "mae": mae,
+                "directional_accuracy": float(dir_acc),
+                "expected_realized_return": expected_realized_return,
+                "win_rate":      round(win_rate, 1),
+                "sharpe_ratio":  round(sharpe, 3),
+                "max_drawdown":  round(max_drawdown, 2),
+            },
+            "trade_log": trade_log,
+            "equity_curve": {
+                "dates":          equity_dates,
+                "lstm_equity":    [round(v, 4) for v in lstm_equity],
+                "buyhold_equity": [round(v, 4) for v in buyhold_equity],
+            },
+        }
 
 # ---------------------------------------------------------------------------
 # Portfolio Optimizer — Riskfolio-Lib

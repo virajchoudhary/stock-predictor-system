@@ -41,6 +41,10 @@ plotly
 # Technical Analysis (130+ indicators)
 ta
 
+# Classical Forecasting (ARIMA + GARCH baseline)
+pmdarima
+arch
+
 # Utilities
 statsmodels
 python-dotenv

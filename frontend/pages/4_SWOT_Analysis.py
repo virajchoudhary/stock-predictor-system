@@ -23,8 +23,6 @@ _backend = os.path.join(os.path.dirname(__file__), "..", "..", "backend")
 if os.path.isdir(_backend) and _backend not in sys.path:
     sys.path.insert(0, _backend)
 
-from components.sidebar import render_backtest_sidebar
-
 API_URL = "http://127.0.0.1:8000/api"
 
 # ── page config ────────────────────────────────────────────────────────
@@ -33,7 +31,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-target_date = render_backtest_sidebar()
+target_date = None
 
 # ═══════════════════════════════════════════════════════════════════════
 # CSS — Premium dark analyst terminal
