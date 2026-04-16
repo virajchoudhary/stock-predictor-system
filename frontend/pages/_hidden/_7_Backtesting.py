@@ -29,7 +29,9 @@ with col1:
 with col2:
     target_date = st.date_input(
         "Target Date (Prediction Origin)",
-        value=datetime.now().date() - timedelta(days=180),
+        value=datetime(2024, 7, 1),
+        min_value=datetime(2022, 1, 1),
+        max_value=datetime.today() - timedelta(days=90),
         help="The model will ONLY be trained on data prior to this date."
     )
 

@@ -1740,10 +1740,11 @@ def _run_allocation(tickers, risk_tolerance):
             st.error(f"Optimization failed: {error}")
 
 # Tabs
-tab_allocator, tab_bl, tab_report = st.tabs([
+tab_allocator, tab_bl, tab_report, tab4 = st.tabs([
     "Portfolio Allocator",
     "Black-Litterman",
-    "Deep Report (Backtest)"
+    "Deep Report (Backtest)",
+    "Backtest"
 ])
 
 # --- TAB 1: ALLOCATOR ---
@@ -2531,141 +2532,302 @@ with tab_report:
             with st.expander("Legacy HTML Preview", expanded=False):
                 components.html(report_context["html_content"], height=800, scrolling=True)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Model Validation — Validate Underlying Asset Predictions
-# ──────────────────────────────────────────────────────────────────────────────
-st.divider()
-with st.expander("Validate Underlying Asset Predictions", expanded=False):
-    st.markdown(
-        "Test the LSTM model's out-of-sample accuracy on any individual ticker from your portfolio. "
-        "The model is trained on data up to the selected past date and its predictions are compared "
-        "against the actual market path that followed."
+with tab4:
+    st.markdown("### Point-in-Time Backtest")
+    st.caption(
+        "Train the model strictly on pre-cutoff data and evaluate forward predictions. "
+        "All rows in the prediction log are independently verifiable against any public source."
     )
 
-    # Default to the first ticker currently entered in the allocator
-    _pf_default_sym = tickers_input.split(",")[0].strip() if tickers_input.strip() else "AAPL"
-    pf_val_symbol = st.text_input("Symbol to Validate", _pf_default_sym, key="pf_val_symbol")
+    from datetime import datetime, timedelta
 
-    pf_col_date, pf_col_cache, pf_col_btn = st.columns([2, 2, 1])
-    with pf_col_date:
-        pf_val_past_date = st.date_input(
-            "Select Past Date",
-            value=datetime.now() - timedelta(days=30),
-            max_value=datetime.now() - timedelta(days=7),
-            key="pf_val_past_date",
+    bt_col1, bt_col2, bt_col3 = st.columns([2, 2, 1])
+    with bt_col1:
+        bt_symbol = st.text_input(
+            "Ticker Symbol",
+            value="AAPL",
+            key="pf_bt_symbol"
+        ).upper().strip()
+    with bt_col2:
+        bt_date = st.date_input(
+            "Backtest Origin Date",
+            value=datetime(2024, 7, 1),
+            min_value=datetime(2022, 1, 1),
+            max_value=datetime.today() - timedelta(days=90),
+            key="pf_bt_date"
         )
-    with pf_col_cache:
-        st.write("")
-        pf_force_retrain = st.checkbox(
-            "Force Retrain (Ignore Cache)",
-            value=False,
-            help="Deletes stored hyperparameters for this symbol and retrains from scratch using the current architecture defaults.",
-            key="pf_val_force_retrain",
-        )
-    with pf_col_btn:
-        st.write("")
-        st.write("")
-        pf_run_val = st.button("Run Validation", use_container_width=True, key="pf_val_run_btn")
+    with bt_col3:
+        bt_force = st.checkbox("Force Retrain", value=False, key="pf_bt_force")
 
-    if pf_run_val:
-        pf_spinner_msg = (
-            "Purging cache and retraining from scratch..."
-            if pf_force_retrain else
-            "Running LSTM validation slice..."
-        )
-        with st.spinner(pf_spinner_msg):
+    bt_run = st.button("Run Backtest", key="pf_bt_run", type="primary")
+
+    if bt_run and bt_symbol:
+        bt_past_date = bt_date.strftime("%Y-%m-%d")
+        bt_currency  = "₹" if bt_symbol.endswith((".NS", ".BO")) else "$"
+
+        lstm_data      = None
+        classical_data = None
+
+        with st.spinner("Running LSTM + ARIMA/GARCH backtests..."):
             try:
-                pf_fr_param = "true" if pf_force_retrain else "false"
-                pf_resp = requests.get(
-                    f"{API_URL}/backtest-predict/{pf_val_symbol}/"
-                    f"?past_date={pf_val_past_date.strftime('%Y-%m-%d')}"
-                    f"&force_retrain={pf_fr_param}"
+                r1 = requests.get(
+                    f"{API_URL}/backtest-predict/{bt_symbol}/",
+                    params={
+                        "past_date":    bt_past_date,
+                        "force_retrain": "true" if bt_force else "false"
+                    },
+                    timeout=120
                 )
-                if pf_resp.status_code == 200:
-                    pf_data = pf_resp.json()
-                    if "error" in pf_data:
-                        st.error(pf_data["error"])
-                    else:
-                        pf_hist    = pf_data["historical"]
-                        pf_test    = pf_data["test"]
-                        pf_metrics = pf_data["metrics"]
-
-                        pf_hist_dates  = pd.to_datetime(pf_hist["dates"])
-                        pf_hist_prices = pf_hist["prices"]
-                        pf_test_dates  = pd.to_datetime(pf_test["dates"])
-                        pf_actual      = pf_test["actual"]
-                        pf_pred        = pf_test["predicted"]
-
-                        if len(pf_hist_dates) > 0 and len(pf_test_dates) > 0:
-                            _anchor_d = pf_hist_dates[-1]
-                            _anchor_p = pf_hist_prices[-1]
-                            pf_act_dates  = [_anchor_d] + list(pf_test_dates)
-                            pf_act_prices = [_anchor_p] + pf_actual
-                            pf_pred_dates  = [_anchor_d] + list(pf_test_dates)
-                            pf_pred_prices = [_anchor_p] + pf_pred
-                        else:
-                            pf_act_dates   = list(pf_test_dates)
-                            pf_act_prices  = pf_actual
-                            pf_pred_dates  = list(pf_test_dates)
-                            pf_pred_prices = pf_pred
-
-                        pf_fig = go.Figure()
-                        pf_fig.add_trace(go.Scatter(
-                            x=pf_hist_dates, y=pf_hist_prices,
-                            mode="lines", name="Historical",
-                            line=dict(color="#7A9BB5", dash="solid", width=2),
-                        ))
-                        pf_fig.add_trace(go.Scatter(
-                            x=pf_act_dates, y=pf_act_prices,
-                            mode="lines", name="Actual Market Path",
-                            line=dict(color="#00FF94", dash="solid", width=2),
-                        ))
-                        pf_fig.add_trace(go.Scatter(
-                            x=pf_pred_dates, y=pf_pred_prices,
-                            mode="lines", name="LSTM Prediction",
-                            line=dict(color="#FFB800", dash="dash", width=2),
-                        ))
-                        pf_fig.update_layout(
-                            paper_bgcolor="#080C10", plot_bgcolor="#080C10",
-                            font=dict(family="IBM Plex Mono", color="#7A9BB5", size=10),
-                            xaxis=dict(gridcolor="#1E2D3D", rangeslider_visible=True),
-                            yaxis=dict(gridcolor="#1E2D3D", title="Price"),
-                            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-                            margin=dict(l=0, r=0, t=30, b=0),
-                            height=450,
-                        )
-                        st.plotly_chart(pf_fig, use_container_width=True)
-
-                        pf_m1, pf_m2, pf_m3, pf_m4 = st.columns(4)
-                        pf_m1.metric("RMSE (Root Mean Square Error)", f"{pf_metrics['rmse']:.2f}")
-                        pf_m2.metric("MAE (Mean Absolute Error)", f"{pf_metrics['mae']:.2f}")
-                        pf_dir_acc   = pf_metrics["directional_accuracy"]
-                        pf_dir_color = "normal" if pf_dir_acc >= 50 else "inverse"
-                        pf_m3.metric(
-                            "Directional Accuracy", f"{pf_dir_acc:.1f}%",
-                            delta="Profitable Edge" if pf_dir_acc >= 50 else "Random Walk",
-                            delta_color=pf_dir_color,
-                        )
-                        pf_err       = pf_metrics.get("expected_realized_return", 0.0)
-                        pf_err_color = "#00FF94" if pf_err >= 0 else "#FF4466"
-                        pf_err_sign  = "+" if pf_err >= 0 else ""
-                        pf_m4.markdown(
-                            f"""<div style="background:#0A0E14;border:1px solid #1E2D3D;
-                            border-top:2px solid {pf_err_color};padding:1rem 1.25rem;border-radius:3px;">
-                                <div style="font-family:'IBM Plex Mono',monospace;font-size:0.58rem;
-                                letter-spacing:0.12em;text-transform:uppercase;color:#7A9BB5;margin-bottom:0.3rem;">
-                                Expected Realized Return (Net)</div>
-                                <div style="font-family:'IBM Plex Mono',monospace;font-size:1.4rem;
-                                color:{pf_err_color};font-weight:600;">{pf_err_sign}{pf_err:.2f}%</div>
-                            </div>""",
-                            unsafe_allow_html=True,
-                        )
-                        st.caption(
-                            "Metrics account for T+1 Open execution, 0.1% commissions, "
-                            "and 0.05% slippage for real-world accuracy."
-                        )
+                if r1.status_code == 200:
+                    lstm_data = r1.json()
                 else:
-                    st.error(f"Validation failed (Status: {pf_resp.status_code})")
+                    st.error(f"LSTM backtest error: {r1.text}")
             except Exception as e:
-                st.error(f"API Error: {e}")
+                st.error(f"LSTM backtest failed: {e}")
+
+            if lstm_data:
+                try:
+                    r2 = requests.get(
+                        f"{API_URL}/backtest-classical/{bt_symbol}/",
+                        params={"past_date": bt_past_date},
+                        timeout=120
+                    )
+                    if r2.status_code == 200:
+                        classical_data = r2.json()
+                    else:
+                        st.warning(f"Classical model unavailable: {r2.text}")
+                except Exception as e:
+                    st.warning(f"Classical model failed: {e}")
+
+        if lstm_data:
+            # ── Main chart ──────────────────────────────────────────
+            import plotly.graph_objects as go
+            import numpy as np
+
+            fig = go.Figure()
+
+            fig.add_trace(go.Scatter(
+                x=lstm_data["historical"]["dates"],
+                y=lstm_data["historical"]["prices"],
+                name="Historical", mode="lines",
+                line=dict(color="#7A9BB5", width=1.5)
+            ))
+
+            if classical_data:
+                fig.add_trace(go.Scatter(
+                    x=classical_data["test"]["dates"],
+                    y=classical_data["test"]["upper"],
+                    name="95% Confidence (GARCH)", mode="lines",
+                    line=dict(width=0), showlegend=True
+                ))
+                fig.add_trace(go.Scatter(
+                    x=classical_data["test"]["dates"],
+                    y=classical_data["test"]["lower"],
+                    mode="lines", line=dict(width=0),
+                    fill="tonexty",
+                    fillcolor="rgba(191,127,255,0.12)",
+                    showlegend=False
+                ))
+
+            fig.add_trace(go.Scatter(
+                x=lstm_data["test"]["dates"],
+                y=lstm_data["test"]["actual"],
+                name="Actual Price", mode="lines",
+                line=dict(color="#26A69A", width=2)
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=lstm_data["test"]["dates"],
+                y=lstm_data["test"]["predicted"],
+                name="LSTM Predicted", mode="lines",
+                line=dict(color="#F7A600", width=1.5, dash="dash")
+            ))
+
+            if classical_data:
+                fig.add_trace(go.Scatter(
+                    x=classical_data["test"]["dates"],
+                    y=classical_data["test"]["predicted"],
+                    name="ARIMA Predicted", mode="lines",
+                    line=dict(color="#BF7FFF", width=1.5, dash="dash")
+                ))
+
+            all_prices = (
+                lstm_data["historical"]["prices"] +
+                lstm_data["test"]["actual"] +
+                lstm_data["test"]["predicted"]
+            )
+            if classical_data:
+                all_prices += classical_data["test"]["predicted"]
+            price_min = min(all_prices) * 0.97
+            price_max = max(all_prices) * 1.03
+
+            last_actual = lstm_data["test"]["actual"][-1]
+            fig.add_hline(
+                y=last_actual, line_dash="dot",
+                line_color="#00FF94", opacity=0.3,
+                annotation_text=f"Latest: {last_actual:.2f}",
+                annotation_font_color="#00FF94"
+            )
+
+            fig.add_trace(go.Scatter(
+                x=[bt_past_date, bt_past_date],
+                y=[price_min, price_max],
+                name="Backtest Start", mode="lines",
+                line=dict(color="#FF4466", dash="dot", width=1.5)
+            ))
+
+            fig.update_layout(
+                title=f"{bt_symbol} — LSTM vs ARIMA/GARCH Backtest from {bt_past_date}",
+                paper_bgcolor="#080C10", plot_bgcolor="#0A0E14",
+                height=520,
+                yaxis=dict(
+                    title=f"Price ({bt_currency})",
+                    range=[price_min, price_max]
+                ),
+                legend=dict(orientation="v", x=0, y=1),
+                font=dict(color="#E8F4FD")
+            )
+            fig.update_xaxes(
+                rangeselector=dict(
+                    buttons=[
+                        dict(count=1, label="1M", step="month", stepmode="backward"),
+                        dict(count=3, label="3M", step="month", stepmode="backward"),
+                        dict(count=6, label="6M", step="month", stepmode="backward"),
+                        dict(count=1, label="1Y", step="year",  stepmode="backward"),
+                        dict(step="all", label="All")
+                    ],
+                    bgcolor="#1E2D3D", activecolor="#00D4FF",
+                    font=dict(color="#E8F4FD")
+                )
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ── Metrics ─────────────────────────────────────────────
+            st.markdown("### Model Performance Metrics")
+            lm = lstm_data["metrics"]
+            st.markdown("**LSTM Model**")
+            mc1,mc2,mc3,mc4,mc5,mc6 = st.columns(6)
+            mc1.metric("RMSE",      f"{lm['rmse']:.2f}")
+            mc2.metric("MAE",       f"{lm['mae']:.2f}")
+            mc3.metric("Win Rate",  f"{lm['win_rate']:.1f}%")
+            mc4.metric("Sharpe",    f"{lm['sharpe_ratio']:.3f}")
+            mc5.metric("Drawdown",  f"-{lm['max_drawdown']:.2f}%")
+            mc6.metric("Dir. Acc",  f"{lm['directional_accuracy']:.1f}%")
+
+            if classical_data:
+                st.divider()
+                cm = classical_data["metrics"]
+                st.markdown("**ARIMA + GARCH**")
+                mc1,mc2,mc3,mc4,mc5,mc6 = st.columns(6)
+                mc1.metric("RMSE",      f"{cm['rmse']:.2f}")
+                mc2.metric("MAE",       f"{cm['mae']:.2f}")
+                mc3.metric("Win Rate",  f"{cm['win_rate']:.1f}%")
+                mc4.metric("Sharpe",    f"{cm['sharpe_ratio']:.3f}")
+                mc5.metric("Drawdown",  f"-{cm['max_drawdown']:.2f}%")
+                mc6.metric("Dir. Acc",  f"{cm['directional_accuracy']:.1f}%")
+                st.caption(
+                    f"Auto-selected ARIMA order: "
+                    f"{cm.get('arima_order', 'N/A')}"
+                )
+
+            # ── Equity curve ────────────────────────────────────────
+            st.markdown("### Cumulative Strategy Returns (Normalized to 100)")
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(
+                x=lstm_data["equity_curve"]["dates"],
+                y=lstm_data["equity_curve"]["lstm_equity"],
+                name="LSTM Strategy",
+                line=dict(color="#F7A600", width=2)
+            ))
+            fig2.add_trace(go.Scatter(
+                x=lstm_data["equity_curve"]["dates"],
+                y=lstm_data["equity_curve"]["buyhold_equity"],
+                name="Buy & Hold",
+                line=dict(color="#00FF94", width=2, dash="dot")
+            ))
+            if classical_data:
+                fig2.add_trace(go.Scatter(
+                    x=classical_data["equity_curve"]["dates"],
+                    y=classical_data["equity_curve"]["arima_equity"],
+                    name="ARIMA Strategy",
+                    line=dict(color="#BF7FFF", width=2)
+                ))
+            fig2.add_hline(
+                y=100, line_dash="dash",
+                line_color="#7A9BB5", opacity=0.4
+            )
+            fig2.update_layout(
+                paper_bgcolor="#080C10", plot_bgcolor="#0A0E14",
+                height=350,
+                yaxis_title="Portfolio Value (Start = 100)",
+                xaxis_title="Date",
+                font=dict(color="#E8F4FD"),
+                legend=dict(x=0, y=1)
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+            # ── Prediction log ──────────────────────────────────────
+            st.markdown("### Prediction vs Actual Price Log")
+            st.caption(
+                "Every row is independently verifiable against any public "
+                "source. Predicted price is generated strictly from "
+                "pre-cutoff data with zero lookahead."
+            )
+            import pandas as pd
+
+            def highlight_dir(val):
+                color = "#00FF9420" if val else "#FF446620"
+                return f"background-color: {color}"
+
+            plog_tab1, plog_tab2 = st.tabs(
+                ["LSTM Predictions", "ARIMA Predictions"]
+            )
+
+            col_names = [
+                "Date",
+                f"Predicted ({bt_currency})",
+                f"Actual ({bt_currency})",
+                f"Error ({bt_currency})",
+                "Error (%)",
+                "Direction Correct"
+            ]
+
+            with plog_tab1:
+                df_lstm = pd.DataFrame(lstm_data["trade_log"])
+                df_lstm.columns = col_names
+                st.dataframe(
+                    df_lstm.style.applymap(
+                        highlight_dir,
+                        subset=["Direction Correct"]
+                    ).format({
+                        f"Predicted ({bt_currency})": "{:.2f}",
+                        f"Actual ({bt_currency})":    "{:.2f}",
+                        f"Error ({bt_currency})":     "{:.2f}",
+                        "Error (%)":                  "{:.2f}%"
+                    }),
+                    use_container_width=True, height=400
+                )
+
+            with plog_tab2:
+                if classical_data:
+                    df_arima = pd.DataFrame(classical_data["trade_log"])
+                    df_arima.columns = col_names
+                    st.dataframe(
+                        df_arima.style.applymap(
+                            highlight_dir,
+                            subset=["Direction Correct"]
+                        ).format({
+                            f"Predicted ({bt_currency})": "{:.2f}",
+                            f"Actual ({bt_currency})":    "{:.2f}",
+                            f"Error ({bt_currency})":     "{:.2f}",
+                            "Error (%)":                  "{:.2f}%"
+                        }),
+                        use_container_width=True, height=400
+                    )
+                    st.caption(
+                        f"ARIMA order: "
+                        f"{classical_data['metrics'].get('arima_order','N/A')}"
+                    )
+                else:
+                    st.warning("Classical model did not run.")
 
