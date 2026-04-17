@@ -292,21 +292,25 @@ def generate_html_report(sections, title="Quantitative Report", filename="report
         section_id = f"section-{i}"
         toc_links.append(f'<li><a href="#{section_id}">{section["title"]}</a></li>')
 
-        # --- Sidebar Content ---
-        if "sidebar" in section:
-            for item in section["sidebar"]:
-                sidebar_html += f'<h2>{item["title"]}</h2>'
-                if item["type"] == "metrics":
-                    df = pd.DataFrame.from_dict(item["data"], orient='index', columns=['Value'])
-                    sidebar_html += df.to_html(header=False, classes='metrics-table')
-                elif item["type"] == "table_html":
-                    sidebar_html += item["data"]
-
-        # --- Main Content ---
+        # --- Section Container ---
         main_content_html += f'<div id="{section_id}" class="report-section">'
         main_content_html += f'<h1>{section["title"]}</h1>'
         if "description" in section:
             main_content_html += f'<p>{section["description"]}</p>'
+
+        # --- Inject Sidebar Metrics as Top Grid ---
+        if "sidebar" in section and section["sidebar"]:
+            main_content_html += '<div class="metrics-grid">'
+            for item in section["sidebar"]:
+                main_content_html += '<div class="metrics-card">'
+                main_content_html += f'<h2>{item["title"]}</h2>'
+                if item["type"] == "metrics":
+                    df = pd.DataFrame.from_dict(item["data"], orient='index', columns=['Value'])
+                    main_content_html += df.to_html(header=False, classes='metrics-table')
+                elif item["type"] == "table_html":
+                    main_content_html += item["data"]
+                main_content_html += '</div>'
+            main_content_html += '</div>'
 
         for item in section["main_content"]:
             item_class = "plot-item" if item["type"] == "plot" else "table-item"
@@ -367,73 +371,93 @@ def generate_html_report(sections, title="Quantitative Report", filename="report
             html, body {{ margin: 0; padding: 0; }}
             
             :root {{
-                --bg-color: #FFFFFF; --card-color: #F8F9FA; --text-color: #212529;
-                --text-color-muted: #6C757D; --border-color: #DEE2E6; --accent-color: #007BFF;
+                --bg-color: #0b0e14;
+                --card-color: #151b23;
+                --text-color: #e2e8f0;
+                --text-color-muted: #94a3b8;
+                --border-color: #30363d;
+                --accent-color: #00d4ff;
+                --shadow-subtle: 0 4px 12px rgba(0, 0, 0, 0.3);
+                --shadow-hover: 0 8px 24px rgba(0, 0, 0, 0.5);
+                --border-radius: 12px;
             }}
             body {{
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
                 background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 16px;
             }}
             .container {{
-                display: flex; flex-direction: row; align-items: flex-start;
-                justify-content: flex-start; max-width: 1800px; margin: 0 auto; padding: 10px; gap: 30px;
+                display: flex; flex-direction: column; align-items: stretch;
+                justify-content: flex-start; max-width: 1400px; margin: 0 auto; gap: 30px; width: 100%;
             }}
             h1 {{
-                text-align: center; color: var(--accent-color); font-size: 2.5em;
-                margin-bottom: 24px; width: 100%;
+                text-align: center; color: var(--text-color); font-size: 2.5em;
+                font-weight: 700; margin-bottom: 24px; width: 100%;
+                background: -webkit-linear-gradient(45deg, #00d4ff, #bf7fff);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
             }}
             .report-section {{
-                margin-bottom: 30px; padding-bottom: 20px;
-                border-bottom: 2px solid var(--accent-color);
+                background-color: var(--bg-color);
+                margin-bottom: 40px; padding-bottom: 20px;
+                border-bottom: 1px solid var(--border-color);
+                width: 100%;
+                display: flex; flex-direction: column; gap: 24px;
             }}
             .report-section h1 {{
-                text-align: left; font-size: 2em; color: var(--text-color); margin-bottom: 10px;
+                text-align: left; font-size: 2em; margin-bottom: 10px; background: none; -webkit-text-fill-color: var(--text-color);
             }}
-            h2 {{ color: var(--text-color-muted); border-bottom: 2px solid var(--border-color); padding-bottom: 5px; }}
-            h3 {{ color: var(--text-color); }}
-            .sidebar-container {{
-                flex: 0 0 350px;
-                position: sticky; top: 20px;
-                align-self: flex-start;
-                max-height: 90vh;
-                overflow-y: auto;
-            }}
+            h2 {{ color: var(--accent-color); padding-bottom: 5px; font-weight: 600; font-size: 1.4rem; }}
+            h3 {{ color: var(--text-color); font-weight: 500; }}
+            
             .toc {{
                 background-color: var(--card-color); border: 1px solid var(--border-color);
-                border-radius: 8px; padding: 15px; margin-bottom: 20px;
+                border-radius: var(--border-radius); padding: 20px; margin-bottom: 10px;
+                box-shadow: var(--shadow-subtle); width: 100%;
+                overflow-x: auto;
             }}
-            .toc ul {{ list-style-type: none; padding-left: 10px; }}
-            .toc li {{ margin-bottom: 10px; }}
-            .toc a {{ text-decoration: none; color: var(--accent-color); font-weight: 500; }}
-            .toc a:hover {{ text-decoration: underline; }}
+            .toc ul {{ list-style-type: none; padding-left: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 10px; }}
+            .toc li {{ margin-bottom: 0; }}
+            .toc a {{ text-decoration: none; color: var(--text-color-muted); font-weight: 500; transition: color 0.2s ease; display: inline-block; padding: 6px 12px; border-radius: 6px; background-color: rgba(255,255,255,0.02); border: 1px solid var(--border-color); }}
+            .toc a:hover {{ color: var(--accent-color); background-color: rgba(0, 212, 255, 0.05); border-color: var(--accent-color); }}
+            
             .metrics-table {{
-                width: 100%; border-collapse: collapse; margin-bottom: 20px;
+                width: 100%; border-collapse: separate; border-spacing: 0; margin-bottom: 20px;
+                border-radius: 8px; overflow: hidden; border: 1px solid var(--border-color);
+                table-layout: fixed;
             }}
-            .metrics-table th {{ background-color: #E9ECEF; padding: 10px 12px; text-align: left; }}
-            .metrics-table tr:nth-child(odd) {{ background-color: var(--card-color); }}
-            .metrics-table td {{ padding: 10px 12px; border: 1px solid var(--border-color); }}
-            .metrics-table td:first-child {{ font-weight: 600; color: var(--text-color-muted); }}
-            .metrics-table td:not(:first-child) {{ text-align: right; font-weight: 700; }}
-            .plots-container {{
-                flex: 1; display: flex; flex-direction: column; gap: 20px;
-            }}
+            .metrics-table th {{ background-color: #1e2631; padding: 12px 14px; text-align: left; color: var(--text-color); font-weight: 600; }}
+            .metrics-table tr:nth-child(even) {{ background-color: rgba(255,255,255,0.02); }}
+            .metrics-table td {{ padding: 12px 14px; border-bottom: 1px solid var(--border-color); word-wrap: break-word; }}
+            .metrics-table tr:last-child td {{ border-bottom: none; }}
+            .metrics-table td:first-child {{ font-weight: 500; color: var(--text-color-muted); width: 60%; }}
+            .metrics-table td:not(:first-child) {{ text-align: right; font-weight: 600; color: var(--text-color); }}
+            
             .plot-item, .table-item {{
                 background-color: var(--card-color); border: 1px solid var(--border-color);
-                border-radius: 8px; padding: 20px;
+                border-radius: var(--border-radius); padding: 24px;
+                box-shadow: var(--shadow-subtle);
+                transition: transform 0.2s ease, box-shadow 0.2s ease;
+                overflow-x: auto; width: 100%;
+                margin-bottom: 24px;
+            }}
+            .plot-item:hover, .table-item:hover, .metrics-card:hover {{
+                box-shadow: var(--shadow-hover);
             }}
             .metrics-grid {{
-                display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px;
+                display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; margin-top: 10px; margin-bottom: 24px; width: 100%;
             }}
             .metrics-card {{
-                background-color: var(--bg-color); border: 1px solid var(--border-color);
-                border-radius: 8px; padding: 20px;
+                background-color: var(--card-color); border: 1px solid var(--border-color);
+                border-radius: 8px; padding: 20px; box-shadow: var(--shadow-subtle);
             }}
             .report-section h1, .report-section h2, .report-section h3 {{
                 word-wrap: break-word;
+                margin-top: 0;
             }}
             iframe, div.plotly-graph-div {{
                 width: 100% !important;
-                height: auto !important;
+                min-height: 450px;
+                display: block;
             }}
         </style>
     </head>
@@ -444,17 +468,11 @@ def generate_html_report(sections, title="Quantitative Report", filename="report
             </div>
         </noscript>
         <div class="container">
-            <div class="sidebar-container">
-                <div class="toc">
-                    <h2>Navigation</h2>
-                    <ul>{ "".join(toc_links) }</ul>
-                </div>
-                {sidebar_html}
+            <div class="toc">
+                <h2>Quick Navigation</h2>
+                <ul>{ "".join(toc_links) }</ul>
             </div>
-            <div class="plots-container">
-                <h1>{title}</h1>
-                {main_content_html}
-            </div>
+            {main_content_html}
         </div>
     </body>
     </html>

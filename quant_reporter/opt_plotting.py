@@ -8,6 +8,76 @@ from plotly.subplots import make_subplots
 # Import the core math function this file needs
 from .opt_core import get_portfolio_stats
 
+# ─── Attractive fintech color palette ────────────────────────────────────────
+# Used for pie slices, bar segments, and scatter traces
+PALETTE = [
+    "#38bdf8",  # sky blue
+    "#a78bfa",  # soft violet
+    "#34d399",  # emerald
+    "#fb923c",  # vivid orange
+    "#f472b6",  # rose pink
+    "#facc15",  # golden yellow
+    "#60a5fa",  # royal blue
+    "#4ade80",  # lime green
+    "#f87171",  # coral red
+]
+
+STRATEGY_COLORS = {
+    "Equal Weight (Baseline)":       "#38bdf8",
+    "Minimum Volatility":            "#a78bfa",
+    "Balanced (40% Cap)":            "#34d399",
+    "Max Sharpe (Unconstrained)":    "#fb923c",
+    "Black-Litterman":               "#f472b6",
+    "Sector Balanced":               "#facc15",
+    "User Portfolio":                "#60a5fa",
+}
+
+def _strategy_color(name, idx):
+    return STRATEGY_COLORS.get(name, PALETTE[idx % len(PALETTE)])
+
+def _hex_to_rgba(hex_color, alpha):
+    hex_color = hex_color.lstrip('#')
+    return f"rgba({int(hex_color[0:2], 16)}, {int(hex_color[2:4], 16)}, {int(hex_color[4:6], 16)}, {alpha})"
+
+def _base_layout(**extra):
+    """Shared layout defaults for every chart."""
+    layout = dict(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(
+            family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+            color="#e2e8f0",
+            size=13,
+        ),
+        legend=dict(
+            bgcolor="rgba(30,41,59,0.7)",
+            bordercolor="rgba(148,163,184,0.2)",
+            borderwidth=1,
+            font=dict(color="#e2e8f0"),
+        ),
+        hoverlabel=dict(
+            bgcolor="#1e293b",
+            bordercolor="#334155",
+            font=dict(color="#f1f5f9", size=13),
+        ),
+        xaxis=dict(
+            gridcolor="rgba(148,163,184,0.1)",
+            linecolor="rgba(148,163,184,0.3)",
+            tickfont=dict(color="#94a3b8"),
+            title_font=dict(color="#cbd5e1"),
+        ),
+        yaxis=dict(
+            gridcolor="rgba(148,163,184,0.1)",
+            linecolor="rgba(148,163,184,0.3)",
+            tickfont=dict(color="#94a3b8"),
+            title_font=dict(color="#cbd5e1"),
+        ),
+        title_font=dict(color="#f1f5f9", size=16, family="Inter, sans-serif"),
+        margin=dict(l=40, r=40, t=60, b=40),
+    )
+    layout.update(extra)
+    return layout
+
 # --- All Optimization Plotting Functions ---
 
 def plot_efficient_frontier(mean_returns, cov_matrix, optimal_portfolios, frontier_curve, risk_free_rate=0.02):
@@ -42,20 +112,34 @@ def plot_efficient_frontier(mean_returns, cov_matrix, optimal_portfolios, fronti
     
     fig.add_trace(go.Scatter(
         x=vol_arr, y=ret_arr, mode='markers',
-        marker=dict(color=sharpe_arr, colorscale='Viridis', showscale=True, size=5, opacity=0.3, colorbar=dict(title="Sharpe Ratio")),
+        marker=dict(
+            color=sharpe_arr,
+            colorscale='Turbo',
+            showscale=True,
+            size=5,
+            opacity=0.4,
+            colorbar=dict(
+                title="Sharpe Ratio"
+            ),
+        ),
         name='Random Portfolios', text=[f"Sharpe: {s:.2f}" for s in sharpe_arr]
     ))
     
     fig.add_trace(go.Scatter(
         x=frontier_curve['Volatility'], y=frontier_curve['Return'], mode='lines',
-        name='Efficient Frontier', line=dict(color='black', width=3)
+        name='Efficient Frontier', line=dict(color='#38bdf8', width=3)
     ))
     
-    for name, data in optimal_portfolios.items():
+    for idx, (name, data) in enumerate(optimal_portfolios.items()):
         port_ret, port_vol, _ = get_portfolio_stats(data['weights_arr'], mean_returns, cov_matrix, risk_free_rate)
         fig.add_trace(go.Scatter(
             x=[port_vol], y=[port_ret], mode='markers', 
-            marker=dict(color=data['color'], size=12, symbol='star', line=dict(width=1, color='Black')),
+            marker=dict(
+                color=_strategy_color(name, idx),
+                size=14,
+                symbol='star',
+                line=dict(width=1.5, color='#0f172a'),
+            ),
             name=name
         ))
     
@@ -67,15 +151,16 @@ def plot_efficient_frontier(mean_returns, cov_matrix, optimal_portfolios, fronti
         
         fig.add_trace(go.Scatter(
             x=cml_x, y=cml_y, mode='lines',
-            name='Capital Market Line (CML)', line=dict(color='black', dash='dash')
+            name='Capital Market Line (CML)', line=dict(color='#facc15', dash='dash', width=2)
         ))
     
     fig.update_layout(
         title='Efficient Frontier & Optimal Portfolios',
         xaxis_title='Annualized Volatility (Risk)', yaxis_title='Annualized Return',
-        hovermode='closest', template='plotly_white',
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01, bgcolor="rgba(255, 255, 255, 0.7)")
+        hovermode='closest',
+        **_base_layout(),
     )
+    fig.update_layout(legend=dict(bgcolor="rgba(15,23,42,0.85)", bordercolor="rgba(148,163,184,0.25)", borderwidth=1))
     return fig
 
 def plot_correlation_heatmap(log_returns):
@@ -88,7 +173,8 @@ def plot_correlation_heatmap(log_returns):
         corr_matrix, text_auto=".2f",
         color_continuous_scale='RdYlGn', title='Asset Correlation Heatmap'
     )
-    fig.update_layout(template='plotly_white')
+    fig.update_layout(**_base_layout())
+    fig.update_traces(textfont=dict(color="#0f172a", size=12))
     return fig
 
 def plot_cumulative_comparison(cumulative_returns_df, benchmark_ticker):
@@ -98,16 +184,20 @@ def plot_cumulative_comparison(cumulative_returns_df, benchmark_ticker):
     print("Plotting Strategy Cumulative Returns...")
     fig = go.Figure()
     
-    for col in cumulative_returns_df.columns:
+    for idx, col in enumerate(cumulative_returns_df.columns):
+        color = _strategy_color(col, idx)
         fig.add_trace(go.Scatter(
             x=cumulative_returns_df.index, y=cumulative_returns_df[col], name=col,
-            mode='lines', line=dict(width=2, dash=('dot' if col == benchmark_ticker else 'solid'))
+            mode='lines',
+            line=dict(width=2.5 if col != benchmark_ticker else 1.5,
+                      dash='dot' if col == benchmark_ticker else 'solid',
+                      color=color),
         ))
     
     # Bug 8: Context for out of sample returns
     if not cumulative_returns_df.empty:
         oos_start = cumulative_returns_df.index[0]
-        fig.add_vline(x=oos_start, line_dash="dash", line_color="gray")
+        fig.add_vline(x=oos_start, line_dash="dash", line_color="rgba(148,163,184,0.4)")
         fig.add_annotation(
             x=oos_start, y=1.05,
             text="Out-of-sample period →", showarrow=False, xanchor="left",
@@ -118,7 +208,8 @@ def plot_cumulative_comparison(cumulative_returns_df, benchmark_ticker):
     fig.update_layout(
         title='Strategy Performance: Cumulative Returns (Growth of $1)',
         xaxis_title='Date', yaxis_title='Cumulative Growth',
-        hovermode='x unified', template='plotly_white'
+        hovermode='x unified',
+        **_base_layout(),
     )
     return fig
 
@@ -131,10 +222,14 @@ def plot_drawdown_comparison(drawdown_df, benchmark_ticker):
     
     portfolios_to_plot = [col for col in drawdown_df.columns if col != benchmark_ticker]
     
-    for col in portfolios_to_plot:
+    for idx, col in enumerate(portfolios_to_plot):
+        color = _strategy_color(col, idx)
         fig.add_trace(go.Scatter(
             x=drawdown_df.index, y=drawdown_df[col], name=col,
-            mode='lines', line=dict(width=2)
+            mode='lines',
+            line=dict(width=2, color=color),
+            fill='tozeroy',
+            fillcolor=_hex_to_rgba(color, 0.12) if color.startswith('#') else color,
         ))
     
     # Bug 8: Context for drawdown
@@ -154,7 +249,8 @@ def plot_drawdown_comparison(drawdown_df, benchmark_ticker):
     fig.update_layout(
         title='Strategy Performance: Drawdown',
         xaxis_title='Date', yaxis_title='Drawdown',
-        yaxis_tickformat='.1%', hovermode='x unified', template='plotly_white'
+        yaxis_tickformat='.1%', hovermode='x unified',
+        **_base_layout(),
     )
     return fig
 
@@ -167,16 +263,18 @@ def plot_rolling_sharpe(rolling_sharpe_df, benchmark_ticker):
     
     portfolios_to_plot = [col for col in rolling_sharpe_df.columns if col != benchmark_ticker]
     
-    for col in portfolios_to_plot:
+    for idx, col in enumerate(portfolios_to_plot):
+        color = _strategy_color(col, idx)
         fig.add_trace(go.Scatter(
             x=rolling_sharpe_df.index, y=rolling_sharpe_df[col], name=col,
-            mode='lines', line=dict(width=2)
+            mode='lines', line=dict(width=2, color=color)
         ))
     
     fig.update_layout(
         title='Strategy Performance: 60-Day Rolling Sharpe Ratio',
         xaxis_title='Date', yaxis_title='Sharpe Ratio',
-        hovermode='x unified', template='plotly_white'
+        hovermode='x unified',
+        **_base_layout(),
     )
     return fig
 
@@ -209,11 +307,24 @@ def plot_composition_pies(optimal_portfolios):
         values = [weight for ticker, weight in weights_dict.items() if weight > 0.001]
         
         fig.add_trace(go.Pie(
-            labels=labels, values=values, name=name, hole=0.3
+            labels=labels, values=values, name=name, hole=0.4,
+            marker=dict(
+                colors=PALETTE[:len(labels)],
+                line=dict(color='rgba(15,23,42,0.8)', width=2),
+            ),
+            textfont=dict(color='#f1f5f9', size=12),
+            hovertemplate="<b>%{label}</b><br>Weight: %{percent}<extra></extra>",
         ), row=1, col=i+1)
 
     fig.update_traces(textposition='inside', textinfo='percent+label')
-    fig.update_layout(title_text='Portfolio Strategy Compositions (by Asset)')
+    fig.update_layout(
+        title_text='Portfolio Strategy Compositions (by Asset)',
+        **_base_layout(),
+    )
+    # Style subplot titles in white
+    for annotation in fig.layout.annotations:
+        annotation.font.color = "#cbd5e1"
+        annotation.font.size = 12
     return fig
 
 def plot_risk_contribution(optimal_portfolios, mean_returns, cov_matrix, tickers, risk_free_rate=0.02):
@@ -243,12 +354,15 @@ def plot_risk_contribution(optimal_portfolios, mean_returns, cov_matrix, tickers
         risk_df, x='Portfolio', y='Risk Contribution', color='Ticker',
         title='Portfolio Risk Contribution (by Asset)',
         # Re-order x-axis to match the legend of other plots
-        category_orders={"Portfolio": port_names}
+        category_orders={"Portfolio": port_names},
+        color_discrete_sequence=PALETTE,
     )
     fig.update_layout(
         yaxis_tickformat='.0%', yaxis_title='Percent of Total Risk',
-        xaxis_title=None, template='plotly_white', barmode='stack'
+        xaxis_title=None, barmode='stack',
+        **_base_layout(),
     )
+    fig.update_traces(marker_line_color='rgba(15,23,42,0.5)', marker_line_width=0.5)
     return fig
 
 def plot_monthly_heatmaps(eval_data, benchmark_ticker):
@@ -285,8 +399,11 @@ def plot_monthly_heatmaps(eval_data, benchmark_ticker):
 
     fig.update_layout(
         title_text='Strategy Monthly Returns Heatmap',
-        height=300 * len(port_names), template='plotly_white'
+        height=300 * len(port_names),
+        **_base_layout(),
     )
+    for annotation in fig.layout.annotations:
+        annotation.font.color = "#cbd5e1"
     return fig
 
 def plot_portfolio_vs_constituents(all_cumulative_returns):
@@ -296,12 +413,14 @@ def plot_portfolio_vs_constituents(all_cumulative_returns):
     print("Plotting: Portfolio vs. Constituents")
     fig = go.Figure()
     
-    for col in all_cumulative_returns.columns:
+    for idx, col in enumerate(all_cumulative_returns.columns):
+        color = PALETTE[idx % len(PALETTE)]
         fig.add_trace(go.Scatter(
             x=all_cumulative_returns.index,
             y=all_cumulative_returns[col],
             name=col,
-            mode='lines'
+            mode='lines',
+            line=dict(width=2, color=color),
         ))
     
     fig.update_layout(
@@ -309,7 +428,7 @@ def plot_portfolio_vs_constituents(all_cumulative_returns):
         xaxis_title='Date',
         yaxis_title='Cumulative Growth',
         hovermode='x unified',
-        template='plotly_white'
+        **_base_layout(),
     )
     return fig
 
@@ -349,11 +468,23 @@ def plot_sector_allocation_pies(optimal_portfolios, friendly_sector_map):
         values = list(sector_weights.values())
         
         fig.add_trace(go.Pie(
-            labels=labels, values=values, name=name, hole=0.3
+            labels=labels, values=values, name=name, hole=0.4,
+            marker=dict(
+                colors=PALETTE[:len(labels)],
+                line=dict(color='rgba(15,23,42,0.8)', width=2),
+            ),
+            textfont=dict(color='#f1f5f9', size=12),
+            hovertemplate="<b>%{label}</b><br>Weight: %{percent}<extra></extra>",
         ), row=1, col=i+1)
 
     fig.update_traces(textposition='inside', textinfo='percent+label')
-    fig.update_layout(title_text='Portfolio Strategy Compositions (by Sector)')
+    fig.update_layout(
+        title_text='Portfolio Strategy Compositions (by Sector)',
+        **_base_layout(),
+    )
+    for annotation in fig.layout.annotations:
+        annotation.font.color = "#cbd5e1"
+        annotation.font.size = 12
     return fig
 
 def plot_sector_risk_contribution(optimal_portfolios, mean_returns, cov_matrix, tickers, friendly_sector_map, risk_free_rate=0.02):
@@ -397,14 +528,16 @@ def plot_sector_risk_contribution(optimal_portfolios, mean_returns, cov_matrix, 
         y='Risk Contribution',
         color='Sector',
         title='Portfolio Risk Contribution (by Sector)',
-        category_orders={"Portfolio": port_names} # Match other plots
+        category_orders={"Portfolio": port_names}, # Match other plots
+        color_discrete_sequence=PALETTE,
     )
     
     fig.update_layout(
         yaxis_tickformat='.0%',
         yaxis_title='Percent of Total Risk',
         xaxis_title=None,
-        template='plotly_white',
-        barmode='stack'
+        barmode='stack',
+        **_base_layout(),
     )
+    fig.update_traces(marker_line_color='rgba(15,23,42,0.5)', marker_line_width=0.5)
     return fig
