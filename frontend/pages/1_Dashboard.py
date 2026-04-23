@@ -42,7 +42,7 @@ if st.session_state.analysis_result:
     if "error" in data:
         st.error(data["error"])
     else:
-        tab_overview, tab_charts, tab_financials, tab_validation = st.tabs(["OVERVIEW", "CHARTS", "FUNDAMENTALS", "MODEL VALIDATION"])
+        tab_overview, tab_charts, tab_financials = st.tabs(["OVERVIEW", "CHARTS", "FUNDAMENTALS"])
 
         with tab_overview:
             col1, col2, col3 = st.columns(3)
@@ -209,133 +209,6 @@ if st.session_state.analysis_result:
                 )
             else:
                 st.info("No financial data available.")
-
-        with tab_validation:
-            st.markdown("### Model Validation (Proof of Accuracy)")
-            st.markdown("Test the accuracy of the model by hiding recent data and predicting paths up to today.")
-            from datetime import timedelta, datetime
-            
-            # Form layout
-            col_date, col_cache, col_btn = st.columns([2, 2, 1])
-            with col_date:
-                past_date = st.date_input("Select Past Date", value=datetime.now() - timedelta(days=30), max_value=datetime.now() - timedelta(days=7), key="val_past_date")
-            with col_cache:
-                st.write("")  # spacing
-                force_retrain = st.checkbox(
-                    "Force Retrain (Ignore Cache)",
-                    value=False,
-                    help="Deletes stored hyperparameters for this symbol and retrains from scratch using the current architecture defaults.",
-                )
-            with col_btn:
-                st.write("") # spacing
-                st.write("") # spacing
-                run_val = st.button("Run Validation", use_container_width=True)
-
-            if run_val:
-                spinner_msg = "Purging cache and retraining from scratch..." if force_retrain else "Truncating history and running LSTM validation slice..."
-                with st.spinner(spinner_msg):
-                    try:
-                        force_retrain_param = "true" if force_retrain else "false"
-                        val_resp = requests.get(
-                            f"{API_URL}/backtest-predict/{symbol}/"
-                            f"?past_date={past_date.strftime('%Y-%m-%d')}"
-                            f"&force_retrain={force_retrain_param}"
-                        )
-                        if val_resp.status_code == 200:
-                            val_data = val_resp.json()
-                            if "error" in val_data:
-                                st.error(val_data["error"])
-                            else:
-                                hist = val_data["historical"]
-                                test = val_data["test"]
-                                metrics = val_data["metrics"]
-
-                                # Stitch lines together to avoid gaps
-                                hist_dates = pd.to_datetime(hist["dates"])
-                                hist_prices = hist["prices"]
-                                
-                                test_dates = pd.to_datetime(test["dates"])
-                                actual_prices = test["actual"]
-                                pred_prices = test["predicted"]
-                                
-                                if len(hist_dates) > 0 and len(test_dates) > 0:
-                                    last_hist_date = hist_dates[-1]
-                                    last_hist_price = hist_prices[-1]
-                                    
-                                    act_plot_dates = [last_hist_date] + list(test_dates)
-                                    act_plot_prices = [last_hist_price] + actual_prices
-                                    
-                                    pred_plot_dates = [last_hist_date] + list(test_dates)
-                                    pred_plot_prices = [last_hist_price] + pred_prices
-                                else:
-                                    act_plot_dates = list(test_dates)
-                                    act_plot_prices = actual_prices
-                                    pred_plot_dates = list(test_dates)
-                                    pred_plot_prices = pred_prices
-
-                                fig_val = go.Figure()
-                                # 1. Historical Context Trace
-                                fig_val.add_trace(go.Scatter(
-                                    x=hist_dates, y=hist_prices,
-                                    mode="lines", name="Historical",
-                                    line=dict(color="#7A9BB5", dash="solid", width=2)
-                                ))
-                                # 2. Actual Market Path
-                                fig_val.add_trace(go.Scatter(
-                                    x=act_plot_dates, y=act_plot_prices,
-                                    mode="lines", name="Actual Market Path",
-                                    line=dict(color="#00FF94", dash="solid", width=2)
-                                ))
-                                # 3. Model Predicted Path
-                                fig_val.add_trace(go.Scatter(
-                                    x=pred_plot_dates, y=pred_plot_prices,
-                                    mode="lines", name="LSTM Prediction",
-                                    line=dict(color="#FFB800", dash="dash", width=2)
-                                ))
-
-                                fig_val.update_layout(
-                                    paper_bgcolor="#080C10", plot_bgcolor="#080C10",
-                                    font=dict(family="IBM Plex Mono", color="#7A9BB5", size=10),
-                                    xaxis=dict(gridcolor="#1E2D3D", rangeslider_visible=True),
-                                    yaxis=dict(gridcolor="#1E2D3D", title="Price"),
-                                    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-                                    margin=dict(l=0, r=0, t=30, b=0),
-                                    height=450,
-                                )
-                                st.plotly_chart(fig_val, use_container_width=True)
-
-                                # Error Metrics row
-                                m_col1, m_col2, m_col3, m_col4 = st.columns(4)
-                                m_col1.metric("RMSE (Root Mean Square Error)", f"{metrics['rmse']:.2f}")
-                                m_col2.metric("MAE (Mean Absolute Error)", f"{metrics['mae']:.2f}")
-                                dir_acc = metrics['directional_accuracy']
-                                dir_color = "normal" if dir_acc >= 50 else "inverse"
-                                m_col3.metric("Directional Accuracy", f"{dir_acc:.1f}%", delta="Profitable Edge" if dir_acc >= 50 else "Random Walk", delta_color=dir_color)
-
-                                # Expected Realized Return (Net of Fees) — styled red/green
-                                err = metrics.get("expected_realized_return", 0.0)
-                                err_color = "#00FF94" if err >= 0 else "#FF4466"
-                                err_sign  = "+" if err >= 0 else ""
-                                m_col4.markdown(
-                                    f"""<div style="background:#0A0E14;border:1px solid #1E2D3D;
-                                    border-top:2px solid {err_color};padding:1rem 1.25rem;border-radius:3px;">
-                                        <div style="font-family:'IBM Plex Mono',monospace;font-size:0.58rem;
-                                        letter-spacing:0.12em;text-transform:uppercase;color:#7A9BB5;margin-bottom:0.3rem;">
-                                        Expected Realized Return (Net)</div>
-                                        <div style="font-family:'IBM Plex Mono',monospace;font-size:1.4rem;
-                                        color:{err_color};font-weight:600;">{err_sign}{err:.2f}%</div>
-                                    </div>""",
-                                    unsafe_allow_html=True,
-                                )
-
-                                st.caption(
-                                    "Metrics account for T+1 Open execution, 0.1% commissions, "
-                                    "and 0.05% slippage for real-world accuracy."
-                                )
-                        else:
-                            st.error(f"Validation failed (Status: {val_resp.status_code})")
-                    except Exception as e:
-                        st.error(f"API Error: {e}")
 
         st.divider()
         section_label("Contextual Q&A", "#00D4FF")

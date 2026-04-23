@@ -1,54 +1,14 @@
-*.DS_Store
-*.env
+__pycache__/
 *.pyc
 *.pyo
-._*
-__pycache__/
-backend/venv/
-celerybeat-schedule
-celerybeat-schedule-shm
-celerybeat-schedule-wal
-portfolio_report.html
-backend/db.sqlite3
-frontend/venv/
-logs/
-*.log
-
-# RL runtime artifacts
-backend/api/rl_models/
-backend/api/rl_progress/
-backend/api/rl_hpo_cache/
-ppo_portfolio_model.zip
+*.pyd
+.env
+.env.*
+*.sqlite3
 .cache/
-
-# Test and scratch files
-test_*.py
-scratch/
-out.txt
-out_bt.txt
-out_opt.txt
-error.html
-error2.html
-delete_files.py
-
-# Database
-backend/db.sqlite3
-
-# Cache and generated artifacts
-.cache/
-backend/api/rl_models/
-backend/api/rl_progress/
-backend/api/rl_hpo_cache/
-*.db-shm
-*.db-wal
-
-# Claude Code artifacts
 .claude/
-worktrees/
-
-# OS artifacts
+.streamlit/
 .DS_Store
-settings.local.json
-
-# Python packaging
-*.egg-info/
+node_modules/
+dist/
+build/
