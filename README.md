@@ -876,11 +876,6 @@ MIT License - see LICENSE file for details
 
 This system is for educational and research purposes. Past performance does not guarantee future results. Always consult with a financial advisor before making investment decisions. Use at your own risk. The creators assume no liability for trading losses.
 
-## Contact
-
-For issues, questions, or suggestions:
-- GitHub Issues: https://github.com/virajchoudhary/stock-predictor-system/issues
-- Email: viraj@example.com
 
 ## Acknowledgments
 
