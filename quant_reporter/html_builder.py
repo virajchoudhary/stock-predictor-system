@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import plotly.io as pio
 from io import StringIO
+from html import escape
 
 
 def _build_swot_html(swot_data):
@@ -282,6 +283,7 @@ def generate_html_report(sections, title="Quantitative Report", filename="report
     Generates a flexible, cross-browser HTML report from a list of sections.
     """
     print("Assembling HTML report...")
+    title = escape(title)
 
     sidebar_html = ""
     main_content_html = ""
